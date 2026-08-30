@@ -249,3 +249,35 @@ def test_live_snapshot_reports_recent_local_activity():
         assert result["requests_per_minute"] == 1
         assert result["tokens_per_minute"] == 120
         assert result["active_applications"] == 1
+
+def test_model_inventory_and_comparison_do_not_invent_quality():
+    with TestClient(app) as client:
+        client.post("/api/v1/demo?days=30")
+        inventory=client.get("/api/v1/models/inventory?days=30").json()
+        observed=next(x for x in inventory["models"] if x["model"]=="llama-3.1-8b")
+        assert observed["requests"] > 0
+        assert observed["quality_metrics"] == []
+        comparison=client.get("/api/v1/models/compare?models=llama-3.1-8b,generic-premium&days=30")
+        assert comparison.status_code == 200
+        assert comparison.json()["labels"]["quality"] == "USER-SUPPLIED ONLY"
+        assert "not assumed equivalent" in comparison.json()["disclaimer"]
+        assert client.get("/api/v1/models/compare?models=llama-3.1-8b").status_code == 422
+
+def test_user_evaluation_is_validated_audited_and_displayed():
+    payload={"model":"llama-3.1-8b","application":"Support Agent","workload":"ticket-resolution","metric":"task_accuracy","score":92,"maximum_score":100,"sample_size":250,"source":"Internal benchmark v1","notes":"Human-reviewed test set"}
+    with TestClient(app) as client:
+        created=client.post("/api/v1/evaluations",json=payload)
+        assert created.status_code == 201
+        assert created.json()["normalized_score_percent"] == 92
+        listed=client.get("/api/v1/evaluations?model=llama-3.1-8b").json()
+        assert listed[0]["quality_label"] == "USER-SUPPLIED"
+        assert listed[0]["sample_size"] == 250
+        inventory=client.get("/api/v1/models/inventory").json()
+        model=next(x for x in inventory["models"] if x["model"]=="llama-3.1-8b")
+        assert model["quality_metrics"][0]["normalized_score_percent"] == 92
+        assert client.get("/api/v1/audit").json()[0]["action"] == "model_evaluation.created"
+
+def test_evaluation_rejects_score_outside_scale():
+    payload={"model":"test","metric":"accuracy","score":110,"maximum_score":100,"source":"Invalid test"}
+    with TestClient(app) as client:
+        assert client.post("/api/v1/evaluations",json=payload).status_code == 422

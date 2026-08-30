@@ -130,3 +130,18 @@ class AuditEvent(Base):
     target_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     outcome: Mapped[str] = mapped_column(String(20), default="success")
     details: Mapped[dict] = mapped_column(JSON, default=dict)
+
+class ModelEvaluation(Base):
+    __tablename__ = "model_evaluations"
+
+    evaluation_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+    model: Mapped[str] = mapped_column(String(120), index=True)
+    application: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    workload: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    metric: Mapped[str] = mapped_column(String(100), index=True)
+    score: Mapped[float] = mapped_column(Float)
+    maximum_score: Mapped[float] = mapped_column(Float)
+    sample_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source: Mapped[str] = mapped_column(String(200))
+    notes: Mapped[str | None] = mapped_column(String(1000), nullable=True)

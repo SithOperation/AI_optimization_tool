@@ -170,3 +170,21 @@ class PrivacyRequest(BaseModel):
     @model_validator(mode="after")
     def content_warning(self):
         return self
+
+class ModelEvaluationCreate(BaseModel):
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    model: str = Field(min_length=1, max_length=120)
+    application: str | None = Field(default=None, max_length=120)
+    workload: str | None = Field(default=None, max_length=120)
+    metric: str = Field(min_length=1, max_length=100)
+    score: float
+    maximum_score: float = Field(gt=0)
+    sample_size: int | None = Field(default=None, ge=1)
+    source: str = Field(min_length=1, max_length=200)
+    notes: str | None = Field(default=None, max_length=1000)
+
+    @model_validator(mode="after")
+    def valid_score(self):
+        if self.score < 0 or self.score > self.maximum_score:
+            raise ValueError("score must be between zero and maximum_score")
+        return self

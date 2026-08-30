@@ -18,9 +18,9 @@ from sqlalchemy.orm import Session
 from .database import Base, SessionLocal, engine
 from .demo import generate_demo
 from .importer import parse_import
-from .models import AppSetting, AuditEvent, Budget, CloudProviderConfig, ForecastRun, Integration, PriceOverride, TelemetryEvent
+from .models import AppSetting, AuditEvent, Budget, CloudProviderConfig, ForecastRun, Integration, ModelEvaluation, PriceOverride, TelemetryEvent
 from .pricing import calculate, get_price, registry
-from .schemas import AdapterEvent, BatchCreate, BudgetCreate, CloudProviderRequest, EventCreate, ImportRequest, IntegrationRequest, LocalCloudRequest, MigrationRequest, PriceOverrideCreate, PrivacyRequest, RetentionRequest, ScenarioRequest
+from .schemas import AdapterEvent, BatchCreate, BudgetCreate, CloudProviderRequest, EventCreate, ImportRequest, IntegrationRequest, LocalCloudRequest, MigrationRequest, ModelEvaluationCreate, PriceOverrideCreate, PrivacyRequest, RetentionRequest, ScenarioRequest
 from services.forecasting.engine import METRICS, InsufficientHistory, explain_drivers, run_forecast
 from services.anomaly.engine import detect
 from services.optimizer.engine import recommendations
@@ -469,3 +469,44 @@ def executive_report_csv(days:int=Query(30,ge=7,le=365),db:Session=Depends(db_se
     writer.writerow(["optimization","potential_monthly_savings",report["optimization"]["estimated_monthly_savings"],"ESTIMATED"])
     writer.writerow(["anomalies","count",report["anomalies"]["count"],"OBSERVED"])
     return Response(buffer.getvalue(),media_type="text/csv",headers={"Content-Disposition":"attachment; filename=tokenscope-executive-report.csv"})
+
+def evaluation_summary(db,model):
+    rows=db.execute(select(ModelEvaluation.metric,func.avg(ModelEvaluation.score/ModelEvaluation.maximum_score*100),func.sum(func.coalesce(ModelEvaluation.sample_size,1)),func.count()).where(ModelEvaluation.model==model).group_by(ModelEvaluation.metric)).all()
+    return [{"metric":r[0],"normalized_score_percent":round(float(r[1]),2),"total_samples":r[2],"evaluation_runs":r[3],"source":"USER-SUPPLIED EVALUATIONS"} for r in rows]
+
+def model_stats(db,model,days):
+    since=datetime.now(timezone.utc)-timedelta(days=days)
+    row=db.execute(select(func.count(),func.sum(case((TelemetryEvent.success==True,1),else_=0)),func.coalesce(func.avg(TelemetryEvent.latency_ms),0),func.coalesce(func.avg(case((TelemetryEvent.latency_ms>0,TelemetryEvent.output_tokens/(TelemetryEvent.latency_ms/1000.0)),else_=None)),0),func.coalesce(func.sum(TelemetryEvent.estimated_total_cost),0),func.coalesce(func.avg(TelemetryEvent.input_tokens),0),func.coalesce(func.avg(func.coalesce(TelemetryEvent.context_utilization,0)),0),func.coalesce(func.sum(TelemetryEvent.total_tokens),0)).where(TelemetryEvent.timestamp>=since,TelemetryEvent.model==model)).one()
+    identity=db.execute(select(TelemetryEvent.provider,TelemetryEvent.deployment_type,func.count()).where(TelemetryEvent.timestamp>=since,TelemetryEvent.model==model).group_by(TelemetryEvent.provider,TelemetryEvent.deployment_type).order_by(func.count().desc())).first()
+    price=get_price(model,db);requests=row[0] or 0
+    return {"model":model,"provider":identity[0] if identity else price.provider,"deployment":identity[1] if identity else "unknown","input_price_per_million":price.input,"output_price_per_million":price.output,"cached_input_price_per_million":price.cached,"requests":requests,"success_rate":round((row[1] or 0)/requests*100,2) if requests else None,"observed_latency_ms":round(float(row[2]),2) if requests else None,"observed_tokens_per_second":round(float(row[3]),2) if requests else None,"historical_cost":round(float(row[4]),4),"average_context_tokens":round(float(row[5]),1) if requests else None,"average_context_utilization":round(float(row[6]),4) if requests else None,"observed_total_tokens":row[7] or 0,"estimated_monthly_cost_at_observed_rate":round(float(row[4])*30/days,4),"quality_metrics":evaluation_summary(db,model)}
+
+@app.get("/api/v1/models/inventory")
+def model_inventory(days:int=Query(30,ge=1,le=365),db:Session=Depends(db_session)):
+    observed=[row[0] for row in db.execute(select(TelemetryEvent.model).distinct()).all()];known=[x["model_id"] for x in registry(db)];models=sorted(set(observed+known))
+    return {"period_days":days,"models":[model_stats(db,model,days) for model in models],"quality_policy":"Quality metrics appear only when supplied through the evaluation API."}
+
+@app.get("/api/v1/models/compare")
+def compare_models(models:str,days:int=Query(30,ge=1,le=365),db:Session=Depends(db_session)):
+    selected=list(dict.fromkeys(item.strip() for item in models.split(",") if item.strip()))
+    if len(selected)<2 or len(selected)>5: raise HTTPException(422,"Select between 2 and 5 unique models")
+    return {"period_days":days,"models":[model_stats(db,model,days) for model in selected],"disclaimer":"Cost comparison only unless user-supplied evaluation metrics are displayed. Output quality is not assumed equivalent.","labels":{"performance":"OBSERVED","price":"CONFIGURED","monthly_cost":"ESTIMATED","quality":"USER-SUPPLIED ONLY"}}
+
+@app.post("/api/v1/evaluations",status_code=201)
+def create_evaluation(payload:ModelEvaluationCreate,db:Session=Depends(db_session)):
+    row=ModelEvaluation(**payload.model_dump());db.add(row);db.flush();audit(db,"model_evaluation.created","evaluation",row.evaluation_id,model=row.model,metric=row.metric,source=row.source);db.commit()
+    return {"evaluation_id":row.evaluation_id,"normalized_score_percent":round(row.score/row.maximum_score*100,2),"quality_label":"USER-SUPPLIED EVALUATION"}
+
+@app.get("/api/v1/evaluations")
+def list_evaluations(model:str|None=None,application:str|None=None,limit:int=Query(100,ge=1,le=1000),db:Session=Depends(db_session)):
+    clauses=[]
+    if model: clauses.append(ModelEvaluation.model==model)
+    if application: clauses.append(ModelEvaluation.application==application)
+    rows=db.execute(select(ModelEvaluation).where(*clauses).order_by(ModelEvaluation.timestamp.desc()).limit(limit)).scalars().all()
+    return [{"evaluation_id":x.evaluation_id,"timestamp":x.timestamp,"model":x.model,"application":x.application,"workload":x.workload,"metric":x.metric,"score":x.score,"maximum_score":x.maximum_score,"normalized_score_percent":round(x.score/x.maximum_score*100,2),"sample_size":x.sample_size,"source":x.source,"notes":x.notes,"quality_label":"USER-SUPPLIED"} for x in rows]
+
+@app.delete("/api/v1/evaluations/{evaluation_id}")
+def delete_evaluation(evaluation_id:str,db:Session=Depends(db_session)):
+    row=db.get(ModelEvaluation,evaluation_id)
+    if not row: raise HTTPException(404,"Evaluation not found")
+    audit(db,"model_evaluation.deleted","evaluation",evaluation_id,model=row.model);db.delete(row);db.commit();return {"deleted":evaluation_id}
