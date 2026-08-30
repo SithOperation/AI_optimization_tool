@@ -153,3 +153,20 @@ class CloudProviderRequest(BaseModel):
 
 class RetentionRequest(BaseModel):
     days: int | None = Field(default=90, ge=30, le=3650)
+
+class PrivacyRequest(BaseModel):
+    collect_token_counts: bool = True
+    collect_latency: bool = True
+    collect_model: bool = True
+    collect_provider: bool = True
+    collect_application: bool = True
+    collect_workload: bool = True
+    collect_department: bool = False
+    collect_team: bool = False
+    collect_user_identity: bool = False
+    collect_prompt: bool = False
+    collect_response: bool = False
+
+    @model_validator(mode="after")
+    def content_warning(self):
+        return self

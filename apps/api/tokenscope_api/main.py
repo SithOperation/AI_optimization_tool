@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
+import asyncio
 import csv
 import httpx
 import io
@@ -9,7 +10,7 @@ import os
 from urllib.parse import urlparse
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import Integer, case, delete, func, select
 from sqlalchemy.orm import Session
@@ -19,7 +20,7 @@ from .demo import generate_demo
 from .importer import parse_import
 from .models import AppSetting, AuditEvent, Budget, CloudProviderConfig, ForecastRun, Integration, PriceOverride, TelemetryEvent
 from .pricing import calculate, get_price, registry
-from .schemas import AdapterEvent, BatchCreate, BudgetCreate, CloudProviderRequest, EventCreate, ImportRequest, IntegrationRequest, LocalCloudRequest, MigrationRequest, PriceOverrideCreate, RetentionRequest, ScenarioRequest
+from .schemas import AdapterEvent, BatchCreate, BudgetCreate, CloudProviderRequest, EventCreate, ImportRequest, IntegrationRequest, LocalCloudRequest, MigrationRequest, PriceOverrideCreate, PrivacyRequest, RetentionRequest, ScenarioRequest
 from services.forecasting.engine import METRICS, InsufficientHistory, explain_drivers, run_forecast
 from services.anomaly.engine import detect
 from services.optimizer.engine import recommendations
@@ -29,6 +30,7 @@ from integrations.openai_compatible.adapter import normalize_response
 from integrations.opentelemetry.adapter import normalize_otlp
 from integrations.security import validate_local_url
 from services.security.rate_limit import SlidingWindowLimiter
+from services.analytics.efficiency import efficiency_score
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -406,3 +408,64 @@ def export_events(limit: int=Query(100000,ge=1,le=100000),db: Session=Depends(db
     writer=csv.DictWriter(buffer,fieldnames=fields);writer.writeheader()
     for row in rows: writer.writerow({key:csv_safe(getattr(row,key)) for key in fields})
     return Response(buffer.getvalue(),media_type="text/csv",headers={"Content-Disposition":"attachment; filename=tokenscope-events.csv"})
+
+def live_snapshot(db):
+    since=datetime.now(timezone.utc)-timedelta(minutes=1)
+    row=db.execute(select(func.count(),func.coalesce(func.sum(TelemetryEvent.total_tokens),0),func.coalesce(func.sum(TelemetryEvent.estimated_total_cost),0),func.sum(case((TelemetryEvent.success==False,1),else_=0)),func.count(func.distinct(TelemetryEvent.application))).where(TelemetryEvent.timestamp>=since)).one()
+    return {"timestamp":datetime.now(timezone.utc).isoformat(),"requests_per_minute":row[0],"tokens_per_minute":row[1],"estimated_cost_per_hour":round(float(row[2] or 0)*60,4),"recent_errors":row[3] or 0,"active_applications":row[4] or 0,"label":"LIVE LOCAL WINDOW"}
+
+@app.get("/api/v1/live/snapshot")
+def get_live_snapshot(db: Session=Depends(db_session)):
+    return live_snapshot(db)
+
+@app.get("/api/v1/live/stream")
+async def live_stream():
+    async def events():
+        while True:
+            db=SessionLocal()
+            try: payload=live_snapshot(db)
+            finally: db.close()
+            yield f"event: metrics\ndata: {json.dumps(payload)}\n\n"
+            await asyncio.sleep(2)
+    return StreamingResponse(events(),media_type="text/event-stream",headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
+
+@app.get("/api/v1/efficiency")
+def efficiency(days:int=Query(30,ge=1,le=365),db:Session=Depends(db_session)):
+    clauses=filters_for(days)
+    row=db.execute(select(func.count(),func.coalesce(func.sum(TelemetryEvent.estimated_total_cost),0),func.coalesce(func.sum(TelemetryEvent.cached_input_tokens),0),func.coalesce(func.sum(TelemetryEvent.input_tokens),0),func.coalesce(func.sum(TelemetryEvent.retry_count),0),func.sum(case((TelemetryEvent.success==False,1),else_=0)),func.coalesce(func.avg(func.coalesce(TelemetryEvent.context_utilization,0)),0)).where(*clauses)).one()
+    return {"period_days":days,**efficiency_score(requests=row[0],spend=float(row[1]),cached_tokens=row[2],input_tokens=row[3],retries=row[4],failures=row[5] or 0,context_utilization=float(row[6]))}
+
+@app.get("/api/v1/search")
+def global_search(q:str=Query(min_length=2,max_length=100),limit:int=Query(20,ge=1,le=50),db:Session=Depends(db_session)):
+    results=[]
+    for kind,column in FILTER_FIELDS.items():
+        for value in db.scalars(select(column).distinct().where(column.is_not(None),column.contains(q)).limit(limit)).all(): results.append({"type":kind,"label":value,"target":f"usage?{kind}={value}"})
+    for budget in db.execute(select(Budget).where(Budget.name.contains(q)).limit(limit)).scalars().all(): results.append({"type":"budget","label":budget.name,"target":"budgets"})
+    return {"query":q,"results":results[:limit]}
+
+@app.get("/api/v1/settings/privacy")
+def get_privacy(db:Session=Depends(db_session)):
+    row=db.get(AppSetting,"privacy");value=row.value if row else PrivacyRequest().model_dump()
+    return {**value,"notice":"TokenScope does not need prompt or response content to calculate usage, cost, forecasts, or most recommendations.","content_warning":bool(value.get("collect_prompt") or value.get("collect_response"))}
+
+@app.put("/api/v1/settings/privacy")
+def set_privacy(payload:PrivacyRequest,db:Session=Depends(db_session)):
+    value=payload.model_dump();row=db.get(AppSetting,"privacy")
+    if row: row.value=value
+    else: db.add(AppSetting(key="privacy",value=value))
+    audit(db,"privacy.configured","setting","privacy",content_enabled=value["collect_prompt"] or value["collect_response"],identity_enabled=value["collect_user_identity"]);db.commit()
+    return get_privacy(db)
+
+@app.get("/api/v1/reports/executive")
+def executive_report(days:int=Query(30,ge=7,le=365),db:Session=Depends(db_session)):
+    overview_data=overview(days,db);optimization_data=optimization(days,db);anomaly_data=anomalies(max(14,days),10,db);budget_data=list_budgets(db)
+    latest=db.execute(select(ForecastRun).order_by(ForecastRun.created_at.desc())).scalars().first()
+    return {"title":"TokenScope Executive AI Usage Report","generated_at":datetime.now(timezone.utc),"period_days":days,"labels":{"usage":"OBSERVED","spend":"ESTIMATED","forecast":"FORECASTED","savings":"ESTIMATED"},"usage":overview_data["totals"],"largest_applications":overview_data["applications"][:5],"largest_models":overview_data["models"][:5],"optimization":optimization_data["summary"],"top_opportunities":optimization_data["recommendations"][:5],"anomalies":{"count":len(anomaly_data["anomalies"]),"items":anomaly_data["anomalies"][:5]},"budgets":budget_data["budgets"],"latest_forecast":None if not latest else {"metric":latest.metric,"horizon_days":latest.horizon_days,"model":latest.selected_model,"smape":latest.error_value,"created_at":latest.created_at},"privacy":"Metadata-only analytics; prompt and response content are not required."}
+
+@app.get("/api/v1/reports/executive.csv")
+def executive_report_csv(days:int=Query(30,ge=7,le=365),db:Session=Depends(db_session)):
+    report=executive_report(days,db);buffer=io.StringIO();writer=csv.writer(buffer);writer.writerow(["section","metric","value","label"])
+    for key,value in report["usage"].items(): writer.writerow(["usage",key,csv_safe(value),"OBSERVED" if key!="spend" else "ESTIMATED"])
+    writer.writerow(["optimization","potential_monthly_savings",report["optimization"]["estimated_monthly_savings"],"ESTIMATED"])
+    writer.writerow(["anomalies","count",report["anomalies"]["count"],"OBSERVED"])
+    return Response(buffer.getvalue(),media_type="text/csv",headers={"Content-Disposition":"attachment; filename=tokenscope-executive-report.csv"})

@@ -2,7 +2,7 @@
 
 **Free, open-source, local-first AI usage intelligence.** TokenScope monitors token usage, estimates spend, and provides a foundation for explainable forecasting and optimization. It requires no commercial AI account, cloud service, API key, or external telemetry.
 
-Milestones 1 through 7 provide a local analytics platform with ingestion, analytics, forecasts, optimization, scenarios, adapters, optional secret-safe provider configuration, audit logs, retention, exports, authentication, rate limiting, and CI.
+Milestones 1 through 8 provide a local analytics platform with ingestion, analytics, forecasts, optimization, scenarios, adapters, enterprise controls, live operations, executive reports, global search, themes, and privacy settings.
 
 ## Quick start
 
@@ -73,6 +73,8 @@ Scenario assumptions and formulas are documented in [Scenario Lab](docs/scenario
 Local adapters and instrumentation examples are documented in [integrations](docs/integrations.md).
 
 Deployment hardening is documented in [security](docs/security.md).
+
+Live metrics, reports, and the transparent efficiency formula are documented in [live and reports](docs/live-and-reports.md).
 
 ## Roadmap
 

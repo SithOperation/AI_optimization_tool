@@ -209,3 +209,43 @@ def test_retention_requires_explicit_apply_and_csv_is_formula_safe():
         assert client.get("/api/v1/health").json()["events"] == 1
         applied=client.post("/api/v1/settings/retention/apply").json()
         assert applied["deleted"] == 1
+
+def test_efficiency_score_is_transparent_and_bounded():
+    with TestClient(app) as client:
+        client.post("/api/v1/demo?days=30")
+        result=client.get("/api/v1/efficiency?days=30").json()
+        assert 0 <= result["score"] <= 100
+        assert sum(result["weights"].values()) == 1
+        assert set(result["components"]) == set(result["weights"])
+        assert "not business value" in result["disclaimer"]
+
+def test_executive_report_and_search_use_analytics_labels():
+    with TestClient(app) as client:
+        client.post("/api/v1/demo?days=30")
+        report=client.get("/api/v1/reports/executive?days=30")
+        assert report.status_code == 200
+        data=report.json()
+        assert data["labels"]["usage"] == "OBSERVED"
+        assert data["labels"]["savings"] == "ESTIMATED"
+        assert data["largest_applications"]
+        assert client.get("/api/v1/reports/executive.csv?days=30").headers["content-type"].startswith("text/csv")
+        search=client.get("/api/v1/search?q=Code").json()
+        assert any(item["label"] == "Code Assistant" for item in search["results"])
+
+def test_privacy_controls_warn_when_content_is_enabled():
+    payload={"collect_token_counts":True,"collect_latency":True,"collect_model":True,"collect_provider":True,"collect_application":True,"collect_workload":True,"collect_department":False,"collect_team":False,"collect_user_identity":False,"collect_prompt":True,"collect_response":False}
+    with TestClient(app) as client:
+        defaults=client.get("/api/v1/settings/privacy").json()
+        assert defaults["collect_prompt"] is False
+        saved=client.put("/api/v1/settings/privacy",json=payload).json()
+        assert saved["content_warning"] is True
+        audit=client.get("/api/v1/audit").json()[0]
+        assert audit["details"]["content_enabled"] is True
+
+def test_live_snapshot_reports_recent_local_activity():
+    with TestClient(app) as client:
+        client.post("/api/v1/events",json={"application":"Live App","provider":"local","model":"llama-3.1-8b","input_tokens":100,"output_tokens":20})
+        result=client.get("/api/v1/live/snapshot").json()
+        assert result["requests_per_minute"] == 1
+        assert result["tokens_per_minute"] == 120
+        assert result["active_applications"] == 1
