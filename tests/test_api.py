@@ -145,3 +145,34 @@ def test_local_cloud_calculator_exposes_components_and_break_even():
         assert data["components"]["hardware_amortization"] == 1000
         assert data["break_even_monthly_tokens"] > 0
         assert data["assumptions"]["quality_equivalence_assumed"] is False
+
+def test_otlp_genai_span_is_normalized_and_ingested():
+    payload={"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"SOC Copilot"}}]},"scopeSpans":[{"spans":[{"traceId":"trace-1","spanId":"span-1","startTimeUnixNano":"1788105600000000000","endTimeUnixNano":"1788105600500000000","attributes":[{"key":"gen_ai.request.model","value":{"stringValue":"llama-3.1-8b"}},{"key":"gen_ai.provider.name","value":{"stringValue":"ollama"}},{"key":"gen_ai.usage.input_tokens","value":{"intValue":"1200"}},{"key":"gen_ai.usage.output_tokens","value":{"intValue":"180"}}]}]}]}]}
+    with TestClient(app) as client:
+        result=client.post("/api/v1/otlp/v1/traces",json=payload)
+        assert result.status_code == 201
+        assert result.json()["accepted"] == 1
+        overview=client.get("/api/v1/overview").json()
+        assert overview["totals"]["tokens"] == 1380
+        assert overview["applications"][0]["application"] == "SOC Copilot"
+
+def test_litellm_and_compatible_adapters_ingest_usage_without_identity():
+    litellm={"model":"ollama/llama-3.1-8b","usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120},"response_cost":.01,"metadata":{"application":"Support Agent","user_api_key_user_id":"sensitive-user"}}
+    compatible={"application":"Local App","source":"ollama","payload":{"model":"qwen2.5-coder-32b","prompt_eval_count":200,"eval_count":40,"total_duration":500000000}}
+    with TestClient(app) as client:
+        assert client.post("/api/v1/integrations/litellm/events",json=litellm).status_code == 201
+        assert client.post("/api/v1/integrations/compatible/events",json=compatible).status_code == 201
+        result=client.get("/api/v1/analytics?group_by=application").json()
+        assert sum(x["total_tokens"] for x in result["items"]) == 360
+
+def test_integration_configuration_and_ssrf_safe_defaults():
+    local={"kind":"ollama","name":"Local Ollama","base_url":"http://localhost:11434","collect_user_identifiers":False}
+    public={"kind":"vllm","name":"Unsafe","base_url":"http://8.8.8.8:8000","collect_user_identifiers":False}
+    with TestClient(app) as client:
+        created=client.post("/api/v1/integrations",json=local)
+        assert created.status_code == 201
+        integration_id=created.json()["integration_id"]
+        listed=client.get("/api/v1/integrations").json()
+        assert listed["configured"][0]["collect_user_identifiers"] is False
+        assert client.post("/api/v1/integrations",json=public).status_code == 400
+        assert client.delete(f"/api/v1/integrations/{integration_id}").status_code == 200

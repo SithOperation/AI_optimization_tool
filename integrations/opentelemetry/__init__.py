@@ -1,0 +1,1 @@
+"""OpenTelemetry GenAI JSON adapter."""

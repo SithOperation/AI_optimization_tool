@@ -1,0 +1,6 @@
+{
+  "model": "ollama/llama-3.1-8b",
+  "usage": {"prompt_tokens": 1200, "completion_tokens": 180, "total_tokens": 1380},
+  "response_cost": 0.001,
+  "metadata": {"application": "Support Agent", "department": "Support"}
+}

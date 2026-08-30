@@ -2,7 +2,7 @@
 
 **Free, open-source, local-first AI usage intelligence.** TokenScope monitors token usage, estimates spend, and provides a foundation for explainable forecasting and optimization. It requires no commercial AI account, cloud service, API key, or external telemetry.
 
-Milestones 1 through 5 provide a functioning local analytics product: ingestion, SQLite persistence, demo data, drilldowns, importing, pricing, forecasts, anomalies, optimization, budgets, capacity scenarios, model migration, and local-versus-cloud economics.
+Milestones 1 through 6 provide a functioning local analytics product with ingestion, analytics, forecasts, optimization, scenarios, OTLP GenAI telemetry, LiteLLM callbacks, and local Ollama/vLLM/OpenAI-compatible adapters.
 
 ## Quick start
 
@@ -70,8 +70,10 @@ See also [anomalies](docs/anomalies.md), [optimization](docs/optimization.md), a
 
 Scenario assumptions and formulas are documented in [Scenario Lab](docs/scenario-lab.md).
 
+Local adapters and instrumentation examples are documented in [integrations](docs/integrations.md).
+
 ## Roadmap
 
-1. OpenTelemetry, LiteLLM, Ollama, vLLM, and local endpoint adapters
+1. Optional commercial-provider integrations and enterprise hardening
 
 Apache-2.0 licensed. Contributions are welcome.

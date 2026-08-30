@@ -4,5 +4,6 @@ COPY apps/api/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY apps/api/tokenscope_api ./tokenscope_api
 COPY services ./services
+COPY integrations ./integrations
 EXPOSE 8000
 CMD ["uvicorn", "tokenscope_api.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
+import httpx
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,13 +10,17 @@ from sqlalchemy.orm import Session
 from .database import Base, SessionLocal, engine
 from .demo import generate_demo
 from .importer import parse_import
-from .models import Budget, ForecastRun, PriceOverride, TelemetryEvent
+from .models import Budget, ForecastRun, Integration, PriceOverride, TelemetryEvent
 from .pricing import calculate, get_price, registry
-from .schemas import BatchCreate, BudgetCreate, EventCreate, ImportRequest, LocalCloudRequest, MigrationRequest, PriceOverrideCreate, ScenarioRequest
+from .schemas import AdapterEvent, BatchCreate, BudgetCreate, EventCreate, ImportRequest, IntegrationRequest, LocalCloudRequest, MigrationRequest, PriceOverrideCreate, ScenarioRequest
 from services.forecasting.engine import METRICS, InsufficientHistory, explain_drivers, run_forecast
 from services.anomaly.engine import detect
 from services.optimizer.engine import recommendations
 from services.simulator.engine import local_vs_cloud, organization_scenario
+from integrations.litellm.adapter import normalize_litellm
+from integrations.openai_compatible.adapter import normalize_response
+from integrations.opentelemetry.adapter import normalize_otlp
+from integrations.security import validate_local_url
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -247,3 +252,62 @@ def simulate_migration(payload: MigrationRequest, db: Session = Depends(db_sessi
 @app.post("/api/v1/simulator/local-vs-cloud")
 def simulate_local_cloud(payload: LocalCloudRequest):
     return {**local_vs_cloud(payload),"disclaimer":"Infrastructure cost estimate only. Throughput, reliability, operations, and output quality assumptions require validation.","labels":{"inputs":"USER-SUPPLIED ASSUMPTIONS","outputs":"ESTIMATED","quality":"NOT EVALUATED"}}
+
+INTEGRATION_CATALOG=[
+    {"kind":"opentelemetry","name":"OpenTelemetry","description":"Receive OTLP/HTTP JSON GenAI spans","optional":False,"endpoint":"/api/v1/otlp/v1/traces"},
+    {"kind":"litellm","name":"LiteLLM","description":"Receive success/failure callback payloads","optional":True,"default_url":"http://localhost:4000"},
+    {"kind":"ollama","name":"Ollama","description":"Discover local Ollama models and accept response usage","optional":True,"default_url":"http://localhost:11434"},
+    {"kind":"vllm","name":"vLLM","description":"Connect to a local OpenAI-compatible vLLM server","optional":True,"default_url":"http://localhost:8001"},
+    {"kind":"generic-openai-compatible","name":"OpenAI-compatible","description":"Connect any local compatible endpoint","optional":True,"default_url":"http://localhost:8080"},
+]
+
+def integration_dict(row):
+    return {"integration_id":row.integration_id,"kind":row.kind,"name":row.name,"base_url":row.base_url,"enabled":row.enabled,"collect_user_identifiers":row.collect_user_identifiers,"status":row.status,"last_checked_at":row.last_checked_at,"created_at":row.created_at}
+
+def check_endpoint(kind,url):
+    safe=validate_local_url(url); path="/api/tags" if kind=="ollama" else "/v1/models"
+    try:
+        response=httpx.get(safe+path,timeout=2.5);response.raise_for_status();body=response.json()
+        models=[item.get("name") or item.get("id") for item in body.get("models",body.get("data",[])) if item.get("name") or item.get("id")]
+        return {"reachable":True,"status_code":response.status_code,"models":models[:50],"checked_url":safe+path}
+    except (httpx.HTTPError,ValueError) as error:
+        return {"reachable":False,"error":f"{type(error).__name__}: {error}","checked_url":safe+path}
+
+@app.get("/api/v1/integrations")
+def integrations_list(db: Session = Depends(db_session)):
+    configured=[integration_dict(row) for row in db.execute(select(Integration).order_by(Integration.created_at)).scalars().all()]
+    return {"catalog":INTEGRATION_CATALOG,"configured":configured,"privacy_default":"User identifiers are disabled","commercial_providers":"Optional — not required for TokenScope"}
+
+@app.post("/api/v1/integrations/test")
+def test_integration(payload: IntegrationRequest):
+    try: return check_endpoint(payload.kind,payload.base_url)
+    except ValueError as error: raise HTTPException(400,str(error)) from error
+
+@app.post("/api/v1/integrations",status_code=201)
+def configure_integration(payload: IntegrationRequest, db: Session = Depends(db_session)):
+    try: url=validate_local_url(payload.base_url)
+    except ValueError as error: raise HTTPException(400,str(error)) from error
+    row=Integration(kind=payload.kind,name=payload.name,base_url=url,collect_user_identifiers=payload.collect_user_identifiers,status="configured")
+    db.add(row);db.commit();return integration_dict(row)
+
+@app.delete("/api/v1/integrations/{integration_id}")
+def remove_integration(integration_id: str, db: Session = Depends(db_session)):
+    row=db.get(Integration,integration_id)
+    if not row: raise HTTPException(404,"Integration not found")
+    db.delete(row);db.commit();return {"deleted":integration_id}
+
+@app.post("/api/v1/integrations/compatible/events",status_code=201)
+def compatible_event(payload: AdapterEvent, db: Session = Depends(db_session)):
+    event=save_event(db,EventCreate.model_validate(normalize_response(payload)));db.commit();return {"accepted":1,"event_id":event.event_id}
+
+@app.post("/api/v1/integrations/litellm/events",status_code=201)
+def litellm_event(payload: dict, db: Session = Depends(db_session)):
+    event=save_event(db,EventCreate.model_validate(normalize_litellm(payload,False)));db.commit();return {"accepted":1,"event_id":event.event_id}
+
+@app.post("/api/v1/otlp/v1/traces",status_code=201)
+def otlp_traces(payload: dict, db: Session = Depends(db_session)):
+    normalized,errors=normalize_otlp(payload);ids=[]
+    for item in normalized:
+        try: ids.append(save_event(db,EventCreate.model_validate(item)).event_id)
+        except (ValueError,HTTPException) as error: errors.append({"span_id":item.get("event_id"),"reason":str(error)})
+    db.commit();return {"accepted":len(ids),"rejected":len(errors),"event_ids":ids,"errors":errors[:50]}

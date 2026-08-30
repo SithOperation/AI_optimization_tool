@@ -129,3 +129,18 @@ class LocalCloudRequest(BaseModel):
     hardware_life_months: int = Field(default=36, ge=1, le=240)
     monthly_maintenance_cost: float = Field(default=0, ge=0)
     monthly_hosting_cost: float = Field(default=0, ge=0)
+
+class IntegrationRequest(BaseModel):
+    kind: Literal["ollama", "vllm", "generic-openai-compatible", "litellm"]
+    name: str = Field(min_length=1, max_length=120)
+    base_url: str = Field(min_length=8, max_length=500)
+    collect_user_identifiers: bool = False
+
+class AdapterEvent(BaseModel):
+    payload: dict
+    application: str = Field(default="OpenAI-compatible application", max_length=120)
+    department: str | None = None
+    team: str | None = None
+    workload: str | None = None
+    provider: str | None = None
+    source: Literal["ollama", "vllm", "generic-openai-compatible"] = "generic-openai-compatible"

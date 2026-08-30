@@ -91,3 +91,16 @@ class Budget(Base):
     currency: Mapped[str] = mapped_column(String(3), default="USD")
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+class Integration(Base):
+    __tablename__ = "integrations"
+
+    integration_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    kind: Mapped[str] = mapped_column(String(50), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    base_url: Mapped[str] = mapped_column(String(500))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    collect_user_identifiers: Mapped[bool] = mapped_column(Boolean, default=False)
+    status: Mapped[str] = mapped_column(String(30), default="configured")
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
