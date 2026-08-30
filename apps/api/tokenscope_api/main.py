@@ -1,8 +1,15 @@
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
+import csv
 import httpx
+import io
+import json
+import logging
+import os
+from urllib.parse import urlparse
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import Integer, case, delete, func, select
 from sqlalchemy.orm import Session
@@ -10,9 +17,9 @@ from sqlalchemy.orm import Session
 from .database import Base, SessionLocal, engine
 from .demo import generate_demo
 from .importer import parse_import
-from .models import Budget, ForecastRun, Integration, PriceOverride, TelemetryEvent
+from .models import AppSetting, AuditEvent, Budget, CloudProviderConfig, ForecastRun, Integration, PriceOverride, TelemetryEvent
 from .pricing import calculate, get_price, registry
-from .schemas import AdapterEvent, BatchCreate, BudgetCreate, EventCreate, ImportRequest, IntegrationRequest, LocalCloudRequest, MigrationRequest, PriceOverrideCreate, ScenarioRequest
+from .schemas import AdapterEvent, BatchCreate, BudgetCreate, CloudProviderRequest, EventCreate, ImportRequest, IntegrationRequest, LocalCloudRequest, MigrationRequest, PriceOverrideCreate, RetentionRequest, ScenarioRequest
 from services.forecasting.engine import METRICS, InsufficientHistory, explain_drivers, run_forecast
 from services.anomaly.engine import detect
 from services.optimizer.engine import recommendations
@@ -21,6 +28,7 @@ from integrations.litellm.adapter import normalize_litellm
 from integrations.openai_compatible.adapter import normalize_response
 from integrations.opentelemetry.adapter import normalize_otlp
 from integrations.security import validate_local_url
+from services.security.rate_limit import SlidingWindowLimiter
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -28,22 +36,40 @@ async def lifespan(_: FastAPI):
     yield
 
 app = FastAPI(title="TokenScope API", version="0.1.0", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:5173", "http://127.0.0.1:5173"], allow_methods=["GET", "POST", "PUT", "DELETE"], allow_headers=["Content-Type"])
+app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:5173", "http://127.0.0.1:5173"], allow_methods=["GET", "POST", "PUT", "DELETE"], allow_headers=["Content-Type", "X-TokenScope-Key"])
+rate_limiter=SlidingWindowLimiter(limit=int(os.getenv("TOKENSCOPE_INGEST_RATE_LIMIT","600")))
+logger=logging.getLogger("tokenscope.access")
+if not logger.handlers:
+    handler=logging.StreamHandler();handler.setFormatter(logging.Formatter('%(message)s'));logger.addHandler(handler);logger.setLevel(logging.INFO)
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     if request.headers.get("content-length") and int(request.headers["content-length"]) > 5_000_000:
-        raise HTTPException(413, "Request body exceeds 5 MB")
+        return JSONResponse({"detail":"Request body exceeds 5 MB"},status_code=413)
+    configured_key=os.getenv("TOKENSCOPE_API_KEY")
+    if configured_key and request.url.path.startswith("/api/v1") and request.url.path!="/api/v1/health" and request.headers.get("X-TokenScope-Key")!=configured_key:
+        return JSONResponse({"detail":"Authentication required"},status_code=401)
+    ingestion_paths=("/api/v1/events","/api/v1/otlp/","/api/v1/integrations/litellm/events","/api/v1/integrations/compatible/events")
+    if request.method=="POST" and any(request.url.path.startswith(path) for path in ingestion_paths):
+        client=request.client.host if request.client else "unknown"
+        if not rate_limiter.allow(client): return JSONResponse({"detail":"Ingestion rate limit exceeded"},status_code=429,headers={"Retry-After":"60"})
+    started=datetime.now(timezone.utc)
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none'"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    logger.info(json.dumps({"timestamp":started.isoformat(),"method":request.method,"path":request.url.path,"status":response.status_code,"duration_ms":round((datetime.now(timezone.utc)-started).total_seconds()*1000,2)}))
     return response
 
 def db_session():
     db = SessionLocal()
     try: yield db
     finally: db.close()
+
+def audit(db,action,target_type,target_id=None,**details):
+    db.add(AuditEvent(action=action,target_type=target_type,target_id=target_id,details=details))
 
 def save_event(db: Session, payload: EventCreate):
     values = payload.model_dump()
@@ -128,7 +154,7 @@ def set_price(model_id: str, payload: PriceOverrideCreate, db: Session = Depends
     if existing:
         for key,value in values.items(): setattr(existing,key,value)
     else: db.add(PriceOverride(**values))
-    db.commit(); return {"saved":model_id.lower(),"applies_to":"future events"}
+    audit(db,"pricing.override_saved","pricing",model_id.lower());db.commit(); return {"saved":model_id.lower(),"applies_to":"future events"}
 
 @app.delete("/api/v1/pricing/{model_id}")
 def delete_price(model_id: str, db: Session = Depends(db_session)):
@@ -222,7 +248,7 @@ def list_budgets(db: Session = Depends(db_session)):
 
 @app.post("/api/v1/budgets",status_code=201)
 def create_budget(payload: BudgetCreate, db: Session = Depends(db_session)):
-    budget=Budget(**payload.model_dump());db.add(budget);db.commit();return budget_status(budget,db)
+    budget=Budget(**payload.model_dump());db.add(budget);db.flush();audit(db,"budget.created","budget",budget.budget_id,scope_type=budget.scope_type);db.commit();return budget_status(budget,db)
 
 @app.delete("/api/v1/budgets/{budget_id}")
 def delete_budget(budget_id: str, db: Session = Depends(db_session)):
@@ -288,13 +314,13 @@ def configure_integration(payload: IntegrationRequest, db: Session = Depends(db_
     try: url=validate_local_url(payload.base_url)
     except ValueError as error: raise HTTPException(400,str(error)) from error
     row=Integration(kind=payload.kind,name=payload.name,base_url=url,collect_user_identifiers=payload.collect_user_identifiers,status="configured")
-    db.add(row);db.commit();return integration_dict(row)
+    db.add(row);db.flush();audit(db,"integration.configured","integration",row.integration_id,kind=row.kind);db.commit();return integration_dict(row)
 
 @app.delete("/api/v1/integrations/{integration_id}")
 def remove_integration(integration_id: str, db: Session = Depends(db_session)):
     row=db.get(Integration,integration_id)
     if not row: raise HTTPException(404,"Integration not found")
-    db.delete(row);db.commit();return {"deleted":integration_id}
+    audit(db,"integration.removed","integration",integration_id,kind=row.kind);db.delete(row);db.commit();return {"deleted":integration_id}
 
 @app.post("/api/v1/integrations/compatible/events",status_code=201)
 def compatible_event(payload: AdapterEvent, db: Session = Depends(db_session)):
@@ -311,3 +337,72 @@ def otlp_traces(payload: dict, db: Session = Depends(db_session)):
         try: ids.append(save_event(db,EventCreate.model_validate(item)).event_id)
         except (ValueError,HTTPException) as error: errors.append({"span_id":item.get("event_id"),"reason":str(error)})
     db.commit();return {"accepted":len(ids),"rejected":len(errors),"event_ids":ids,"errors":errors[:50]}
+
+CLOUD_CATALOG=[
+    {"provider":"openai","name":"OpenAI","default_env_var":"OPENAI_API_KEY"},
+    {"provider":"anthropic","name":"Anthropic","default_env_var":"ANTHROPIC_API_KEY"},
+    {"provider":"gemini","name":"Google Gemini","default_env_var":"GEMINI_API_KEY"},
+    {"provider":"azure-openai","name":"Azure OpenAI","default_env_var":"AZURE_OPENAI_API_KEY"},
+    {"provider":"bedrock","name":"AWS Bedrock","default_env_var":"AWS_ACCESS_KEY_ID"},
+]
+
+def cloud_dict(row):
+    return {"provider":row.provider,"enabled":row.enabled,"credential_env_var":row.credential_env_var,"credential_available":bool(os.getenv(row.credential_env_var)),"endpoint":row.endpoint,"updated_at":row.updated_at,"secret_stored":False}
+
+@app.get("/api/v1/cloud-providers")
+def cloud_providers(db: Session = Depends(db_session)):
+    configured={row.provider:cloud_dict(row) for row in db.execute(select(CloudProviderConfig)).scalars().all()}
+    return {"catalog":[{**item,"configuration":configured.get(item["provider"]),"optional":True,"notice":"Optional — not required for TokenScope"} for item in CLOUD_CATALOG],"secrets_policy":"Credential values are read from environment variables and never stored in the database."}
+
+@app.put("/api/v1/cloud-providers/{provider}")
+def configure_cloud_provider(provider: str, payload: CloudProviderRequest, db: Session = Depends(db_session)):
+    if provider!=payload.provider: raise HTTPException(400,"provider must match the URL")
+    if payload.endpoint:
+        parsed=urlparse(payload.endpoint)
+        if parsed.scheme!="https" or not parsed.hostname or parsed.username or parsed.password: raise HTTPException(400,"Provider endpoints must use HTTPS without embedded credentials")
+    row=db.get(CloudProviderConfig,provider)
+    if row:
+        row.enabled=payload.enabled;row.credential_env_var=payload.credential_env_var;row.endpoint=payload.endpoint;row.updated_at=datetime.now(timezone.utc)
+    else:
+        row=CloudProviderConfig(provider=provider,enabled=payload.enabled,credential_env_var=payload.credential_env_var,endpoint=payload.endpoint);db.add(row)
+    audit(db,"cloud_provider.configured","cloud_provider",provider,enabled=payload.enabled,credential_env_var=payload.credential_env_var);db.commit();return cloud_dict(row)
+
+@app.get("/api/v1/security/status")
+def security_status():
+    return {"api_key_authentication":"enabled" if os.getenv("TOKENSCOPE_API_KEY") else "disabled_local_default","ingestion_rate_limit_per_minute":rate_limiter.limit,"maximum_body_bytes":5_000_000,"content_collection":False,"structured_access_logs":True,"security_headers":True,"warning":"Enable TOKENSCOPE_API_KEY before exposing TokenScope beyond localhost."}
+
+@app.get("/api/v1/settings/retention")
+def get_retention(db: Session = Depends(db_session)):
+    row=db.get(AppSetting,"retention");return row.value if row else {"days":None,"automatic_deletion":False,"notice":"No telemetry is deleted automatically unless configured."}
+
+@app.put("/api/v1/settings/retention")
+def set_retention(payload: RetentionRequest, db: Session = Depends(db_session)):
+    value={"days":payload.days,"automatic_deletion":False,"notice":"Use the explicit apply endpoint to delete records outside this window."};row=db.get(AppSetting,"retention")
+    if row: row.value=value
+    else: db.add(AppSetting(key="retention",value=value))
+    audit(db,"retention.configured","setting","retention",days=payload.days);db.commit();return value
+
+@app.post("/api/v1/settings/retention/apply")
+def apply_retention(db: Session = Depends(db_session)):
+    row=db.get(AppSetting,"retention")
+    if not row or not row.value.get("days"): raise HTTPException(400,"A finite retention period must be configured first")
+    cutoff=datetime.now(timezone.utc)-timedelta(days=row.value["days"]);result=db.execute(delete(TelemetryEvent).where(TelemetryEvent.timestamp<cutoff));audit(db,"retention.applied","telemetry",details_count=result.rowcount,cutoff=cutoff.date().isoformat());db.commit();return {"deleted":result.rowcount,"cutoff":cutoff}
+
+@app.get("/api/v1/audit")
+def audit_log(limit: int=Query(100,ge=1,le=1000),db: Session=Depends(db_session)):
+    rows=db.execute(select(AuditEvent).order_by(AuditEvent.timestamp.desc()).limit(limit)).scalars().all();return [{"audit_id":x.audit_id,"timestamp":x.timestamp,"action":x.action,"target_type":x.target_type,"target_id":x.target_id,"outcome":x.outcome,"details":x.details} for x in rows]
+
+@app.get("/api/v1/export/configuration")
+def export_configuration(db: Session = Depends(db_session)):
+    return {"exported_at":datetime.now(timezone.utc),"retention":get_retention(db),"pricing_overrides":[{"model_id":x.model_id,"provider":x.provider,"input_price_per_million":x.input_price_per_million,"output_price_per_million":x.output_price_per_million,"cached_input_price_per_million":x.cached_input_price_per_million,"currency":x.currency} for x in db.execute(select(PriceOverride)).scalars().all()],"budgets":[{"name":x.name,"scope_type":x.scope_type,"scope_value":x.scope_value,"period":x.period,"amount":x.amount,"currency":x.currency} for x in db.execute(select(Budget)).scalars().all()],"cloud_providers":[cloud_dict(x) for x in db.execute(select(CloudProviderConfig)).scalars().all()],"secrets_included":False}
+
+def csv_safe(value):
+    text="" if value is None else str(value)
+    return "'"+text if text.startswith(("=","+","-","@")) else text
+
+@app.get("/api/v1/export/events.csv")
+def export_events(limit: int=Query(100000,ge=1,le=100000),db: Session=Depends(db_session)):
+    rows=db.execute(select(TelemetryEvent).order_by(TelemetryEvent.timestamp.desc()).limit(limit)).scalars().all();buffer=io.StringIO();fields=["event_id","timestamp","department","team","application","workload","provider","model","input_tokens","output_tokens","cached_input_tokens","total_tokens","latency_ms","success","estimated_total_cost","source"]
+    writer=csv.DictWriter(buffer,fieldnames=fields);writer.writeheader()
+    for row in rows: writer.writerow({key:csv_safe(getattr(row,key)) for key in fields})
+    return Response(buffer.getvalue(),media_type="text/csv",headers={"Content-Disposition":"attachment; filename=tokenscope-events.csv"})

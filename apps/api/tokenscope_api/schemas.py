@@ -144,3 +144,12 @@ class AdapterEvent(BaseModel):
     workload: str | None = None
     provider: str | None = None
     source: Literal["ollama", "vllm", "generic-openai-compatible"] = "generic-openai-compatible"
+
+class CloudProviderRequest(BaseModel):
+    provider: Literal["openai", "anthropic", "gemini", "azure-openai", "bedrock"]
+    enabled: bool = False
+    credential_env_var: str = Field(pattern="^[A-Z][A-Z0-9_]{2,99}$")
+    endpoint: str | None = Field(default=None, max_length=500)
+
+class RetentionRequest(BaseModel):
+    days: int | None = Field(default=90, ge=30, le=3650)

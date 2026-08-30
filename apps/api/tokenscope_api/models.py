@@ -104,3 +104,29 @@ class Integration(Base):
     status: Mapped[str] = mapped_column(String(30), default="configured")
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+class CloudProviderConfig(Base):
+    __tablename__ = "cloud_provider_configs"
+
+    provider: Mapped[str] = mapped_column(String(40), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    credential_env_var: Mapped[str] = mapped_column(String(100))
+    endpoint: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    value: Mapped[dict] = mapped_column(JSON)
+
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+
+    audit_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+    action: Mapped[str] = mapped_column(String(80), index=True)
+    target_type: Mapped[str] = mapped_column(String(50))
+    target_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    outcome: Mapped[str] = mapped_column(String(20), default="success")
+    details: Mapped[dict] = mapped_column(JSON, default=dict)

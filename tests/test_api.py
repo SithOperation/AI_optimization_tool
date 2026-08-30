@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 from fastapi.testclient import TestClient
 
 from apps.api.tokenscope_api.database import Base, engine
@@ -176,3 +178,34 @@ def test_integration_configuration_and_ssrf_safe_defaults():
         assert listed["configured"][0]["collect_user_identifiers"] is False
         assert client.post("/api/v1/integrations",json=public).status_code == 400
         assert client.delete(f"/api/v1/integrations/{integration_id}").status_code == 200
+
+def test_cloud_provider_stores_env_reference_not_secret(monkeypatch):
+    monkeypatch.setenv("TEST_OPENAI_KEY","secret-value-that-must-not-be-exported")
+    payload={"provider":"openai","enabled":True,"credential_env_var":"TEST_OPENAI_KEY","endpoint":None}
+    with TestClient(app) as client:
+        result=client.put("/api/v1/cloud-providers/openai",json=payload)
+        assert result.status_code == 200
+        assert result.json()["credential_available"] is True
+        assert result.json()["secret_stored"] is False
+        exported=client.get("/api/v1/export/configuration").text
+        assert "secret-value-that-must-not-be-exported" not in exported
+        assert client.get("/api/v1/audit").json()[0]["action"] == "cloud_provider.configured"
+
+def test_optional_api_key_authentication(monkeypatch):
+    monkeypatch.setenv("TOKENSCOPE_API_KEY","test-secret")
+    with TestClient(app) as client:
+        assert client.get("/api/v1/health").status_code == 200
+        assert client.get("/api/v1/overview").status_code == 401
+        assert client.get("/api/v1/overview",headers={"X-TokenScope-Key":"test-secret"}).status_code == 200
+
+def test_retention_requires_explicit_apply_and_csv_is_formula_safe():
+    old=(datetime.now(timezone.utc)-timedelta(days=100)).isoformat()
+    payload={"timestamp":old,"application":"=DANGEROUS","provider":"local","model":"llama-3.1-8b","input_tokens":10}
+    with TestClient(app) as client:
+        client.post("/api/v1/events",json=payload)
+        assert "'=DANGEROUS" in client.get("/api/v1/export/events.csv").text
+        configured=client.put("/api/v1/settings/retention",json={"days":30}).json()
+        assert configured["automatic_deletion"] is False
+        assert client.get("/api/v1/health").json()["events"] == 1
+        applied=client.post("/api/v1/settings/retention/apply").json()
+        assert applied["deleted"] == 1
