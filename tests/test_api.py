@@ -109,3 +109,39 @@ def test_budget_crud_and_projection():
         assert budget["risk"] in {"LOW","MEDIUM","HIGH","CRITICAL"}
         assert client.get("/api/v1/budgets").json()["budgets"][0]["name"] == "Engineering monthly"
         assert client.delete(f"/api/v1/budgets/{budget['budget_id']}").status_code == 200
+
+def test_organization_scenario_calculates_capacity_and_validates_mix():
+    payload={"name":"Expected","employees":1000,"adoption_percent":50,"requests_per_user_day":10,"average_input_tokens":4000,"average_output_tokens":500,"working_days_month":20,"monthly_growth_percent":10,"cache_hit_percent":20,"retry_percent":5,"application_growth_percent":0,"model_mix":[{"model":"Economy","share_percent":70,"input_price_per_million":1,"output_price_per_million":2},{"model":"Premium","share_percent":30,"input_price_per_million":3,"output_price_per_million":10}]}
+    with TestClient(app) as client:
+        result=client.post("/api/v1/simulator/scenario",json=payload)
+        assert result.status_code == 200
+        data=result.json()
+        assert data["active_ai_users"] == 500
+        assert data["monthly_requests"] == 100_000
+        assert data["monthly_attempts"] == 105_000
+        assert data["annual_spend"] == data["monthly_spend"]*12
+        payload["model_mix"][0]["share_percent"]=60
+        assert client.post("/api/v1/simulator/scenario",json=payload).status_code == 422
+
+def test_model_migration_uses_observed_volume_and_disclaims_quality():
+    with TestClient(app) as client:
+        client.post("/api/v1/demo?days=30")
+        payload={"application":"Marketing Writer","alternative_model":"llama-3.1-8b","alternative_input_price_per_million":.1,"alternative_output_price_per_million":.1,"days":30}
+        result=client.post("/api/v1/simulator/model-migration",json=payload)
+        assert result.status_code == 200
+        data=result.json()
+        assert data["observed"]["requests"] > 0
+        assert data["alternative"]["estimated_cost"] >= 0
+        assert data["labels"]["current"] == "OBSERVED"
+        assert "quality is not assumed equivalent" in data["disclaimer"]
+
+def test_local_cloud_calculator_exposes_components_and_break_even():
+    payload={"monthly_input_tokens":1_000_000_000,"monthly_output_tokens":200_000_000,"cloud_input_price_per_million":3,"cloud_output_price_per_million":12,"gpu_name":"GPU","gpu_quantity":2,"gpu_purchase_price":18000,"power_draw_watts":700,"electricity_rate_kwh":.15,"utilization_percent":55,"estimated_tokens_second":120,"hardware_life_months":36,"monthly_maintenance_cost":400,"monthly_hosting_cost":0}
+    with TestClient(app) as client:
+        result=client.post("/api/v1/simulator/local-vs-cloud",json=payload)
+        assert result.status_code == 200
+        data=result.json()
+        assert data["cloud_monthly_cost"] == 5400
+        assert data["components"]["hardware_amortization"] == 1000
+        assert data["break_even_monthly_tokens"] > 0
+        assert data["assumptions"]["quality_equivalence_assumed"] is False

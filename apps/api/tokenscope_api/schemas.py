@@ -85,3 +85,47 @@ class BudgetCreate(BaseModel):
         if self.scope_type != "organization" and not self.scope_value:
             raise ValueError("scope_value is required outside organization scope")
         return self
+
+class ModelMixItem(BaseModel):
+    model: str
+    share_percent: float = Field(ge=0, le=100)
+    input_price_per_million: float = Field(ge=0)
+    output_price_per_million: float = Field(ge=0)
+
+class ScenarioRequest(BaseModel):
+    name: str = "Expected"
+    employees: int = Field(ge=1, le=1_000_000)
+    active_ai_users: int | None = Field(default=None, ge=0)
+    adoption_percent: float = Field(default=50, ge=0, le=100)
+    requests_per_user_day: float = Field(default=10, ge=0, le=10000)
+    average_input_tokens: int = Field(default=4000, ge=0)
+    average_output_tokens: int = Field(default=500, ge=0)
+    working_days_month: int = Field(default=22, ge=1, le=31)
+    monthly_growth_percent: float = Field(default=0, ge=-100, le=1000)
+    cache_hit_percent: float = Field(default=0, ge=0, le=100)
+    retry_percent: float = Field(default=0, ge=0, le=100)
+    application_growth_percent: float = Field(default=0, ge=-100, le=1000)
+    model_mix: list[ModelMixItem] = Field(min_length=1, max_length=20)
+
+class MigrationRequest(BaseModel):
+    application: str = Field(min_length=1, max_length=120)
+    alternative_model: str = Field(min_length=1, max_length=120)
+    alternative_input_price_per_million: float | None = Field(default=None, ge=0)
+    alternative_output_price_per_million: float | None = Field(default=None, ge=0)
+    days: int = Field(default=30, ge=1, le=365)
+
+class LocalCloudRequest(BaseModel):
+    monthly_input_tokens: float = Field(ge=0)
+    monthly_output_tokens: float = Field(ge=0)
+    cloud_input_price_per_million: float = Field(ge=0)
+    cloud_output_price_per_million: float = Field(ge=0)
+    gpu_name: str = "Local GPU"
+    gpu_quantity: int = Field(default=1, ge=1, le=10000)
+    gpu_purchase_price: float = Field(ge=0)
+    power_draw_watts: float = Field(ge=0)
+    electricity_rate_kwh: float = Field(default=.15, ge=0)
+    utilization_percent: float = Field(default=50, gt=0, le=100)
+    estimated_tokens_second: float = Field(gt=0)
+    hardware_life_months: int = Field(default=36, ge=1, le=240)
+    monthly_maintenance_cost: float = Field(default=0, ge=0)
+    monthly_hosting_cost: float = Field(default=0, ge=0)

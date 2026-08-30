@@ -10,11 +10,12 @@ from .database import Base, SessionLocal, engine
 from .demo import generate_demo
 from .importer import parse_import
 from .models import Budget, ForecastRun, PriceOverride, TelemetryEvent
-from .pricing import calculate, registry
-from .schemas import BatchCreate, BudgetCreate, EventCreate, ImportRequest, PriceOverrideCreate
+from .pricing import calculate, get_price, registry
+from .schemas import BatchCreate, BudgetCreate, EventCreate, ImportRequest, LocalCloudRequest, MigrationRequest, PriceOverrideCreate, ScenarioRequest
 from services.forecasting.engine import METRICS, InsufficientHistory, explain_drivers, run_forecast
 from services.anomaly.engine import detect
 from services.optimizer.engine import recommendations
+from services.simulator.engine import local_vs_cloud, organization_scenario
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -223,3 +224,26 @@ def delete_budget(budget_id: str, db: Session = Depends(db_session)):
     budget=db.get(Budget,budget_id)
     if not budget: raise HTTPException(404,"Budget not found")
     db.delete(budget);db.commit();return {"deleted":budget_id}
+
+@app.post("/api/v1/simulator/scenario")
+def simulate_scenario(payload: ScenarioRequest):
+    try: result=organization_scenario(payload)
+    except ValueError as error: raise HTTPException(422,str(error)) from error
+    return {**result,"labels":{"inputs":"USER-SUPPLIED ASSUMPTIONS","outputs":"CALCULATED","quality":"NOT EVALUATED"}}
+
+@app.post("/api/v1/simulator/model-migration")
+def simulate_migration(payload: MigrationRequest, db: Session = Depends(db_session)):
+    since=datetime.now(timezone.utc)-timedelta(days=payload.days)
+    row=db.execute(select(TelemetryEvent.model,func.count(),func.sum(TelemetryEvent.input_tokens),func.sum(TelemetryEvent.output_tokens),func.sum(TelemetryEvent.cached_input_tokens),func.sum(TelemetryEvent.estimated_total_cost)).where(TelemetryEvent.timestamp>=since,TelemetryEvent.application==payload.application).group_by(TelemetryEvent.model).order_by(func.count().desc())).first()
+    if not row: raise HTTPException(404,"No observed telemetry found for this application and period")
+    current_model,requests,input_tokens,output_tokens,cached_tokens,current_cost=row
+    alternative=get_price(payload.alternative_model,db)
+    input_price=payload.alternative_input_price_per_million if payload.alternative_input_price_per_million is not None else alternative.input
+    output_price=payload.alternative_output_price_per_million if payload.alternative_output_price_per_million is not None else alternative.output
+    alternative_cost=((input_tokens-cached_tokens)*input_price+cached_tokens*alternative.cached+output_tokens*output_price)/1_000_000
+    savings=(current_cost or 0)-alternative_cost
+    return {"application":payload.application,"period_days":payload.days,"observed":{"model":current_model,"requests":requests,"input_tokens":input_tokens,"output_tokens":output_tokens,"cached_input_tokens":cached_tokens,"cost":round(current_cost or 0,4)},"alternative":{"model":payload.alternative_model,"input_price_per_million":input_price,"output_price_per_million":output_price,"estimated_cost":round(alternative_cost,4)},"estimated_savings":round(savings,4),"estimated_annual_savings":round(savings*(365/payload.days),4),"disclaimer":"Cost comparison only. Output quality is not assumed equivalent.","labels":{"current":"OBSERVED","alternative":"ESTIMATED","quality":"NOT EVALUATED"}}
+
+@app.post("/api/v1/simulator/local-vs-cloud")
+def simulate_local_cloud(payload: LocalCloudRequest):
+    return {**local_vs_cloud(payload),"disclaimer":"Infrastructure cost estimate only. Throughput, reliability, operations, and output quality assumptions require validation.","labels":{"inputs":"USER-SUPPLIED ASSUMPTIONS","outputs":"ESTIMATED","quality":"NOT EVALUATED"}}
