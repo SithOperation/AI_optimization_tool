@@ -1,0 +1,13 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    ports: ["127.0.0.1:8000:8000"]
+    volumes: ["tokenscope_data:/app/database/sqlite"]
+  web:
+    build: .
+    ports: ["127.0.0.1:3000:80"]
+    depends_on: [api]
+volumes:
+  tokenscope_data:
