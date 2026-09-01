@@ -23,6 +23,12 @@ test('first-run wizard renders with private defaults', async ({ page, request })
 
 test('desktop startup recovery exposes safe actions and retry reaches dashboard', async ({ page, request }) => {
   await completeSetup(request);
+  let applicationAttempts = 0;
+  await page.route('**/api/v1/application', async route => {
+    applicationAttempts += 1;
+    if (applicationAttempts <= 2) return route.abort('connectionrefused');
+    return route.continue();
+  });
   await page.addInitScript(() => {
     let phase = 'failed';
     window.__TAURI__ = { core: { invoke: async command => {
@@ -43,6 +49,7 @@ test('desktop startup recovery exposes safe actions and retry reaches dashboard'
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Unable to start local services.' })).toBeVisible();
   await expect(page.getByText('Your telemetry data has not been deleted.')).toBeVisible();
+  await expect(page.locator('#startup-detail-panel')).toBeHidden();
   await page.getByRole('button', { name: 'View Details' }).click();
   await expect(page.getByText('PORT_IN_USE')).toBeVisible();
   await expect(page.getByText('127.0.0.1:8000')).toBeVisible();
@@ -50,6 +57,7 @@ test('desktop startup recovery exposes safe actions and retry reaches dashboard'
   await expect(page.getByRole('status')).toContainText('AIOptimizationTool');
   await page.getByRole('button', { name: 'Retry' }).click();
   await expect(page.getByRole('heading', { name: /Overview/ })).toBeVisible();
+  expect(applicationAttempts).toBe(3);
 });
 
 test('major pages navigate without fatal errors or viewport overflow', async ({ page, request }) => {
