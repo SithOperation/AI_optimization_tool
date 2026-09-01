@@ -118,6 +118,13 @@ def clear_telemetry_data(db: Session, reset_models=TELEMETRY_RESET_MODELS):
         raise
     return {"success": True, "deleted": deleted}
 
+def ensure_aware(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
 @app.get("/api/v1/health")
 def health(db: Session = Depends(db_session)):
     count = db.scalar(select(func.count()).select_from(TelemetryEvent)) or 0
@@ -705,7 +712,7 @@ def get_import_status(import_id: str, db: Session = Depends(db_session)):
     
     rate = 0.0
     if job.processed_rows > 0 and job.started_at:
-        elapsed = (datetime.now(timezone.utc) - job.started_at).total_seconds()
+        elapsed = (datetime.now(timezone.utc) - ensure_aware(job.started_at)).total_seconds()
         if elapsed > 0:
             rate = job.processed_rows / elapsed
     
@@ -765,10 +772,12 @@ async def commit_import(import_id: str, payload: ImportCommit, db: Session = Dep
             "duplicate_skipped": results["duplicate_skipped"]
         }
     except Exception as e:
+        db.rollback()
         job = db.get(ImportJob, import_id)
         if job:
             job.status = "FAILED"
             job.failure_reason = str(e)
+            job.completed_at = datetime.now(timezone.utc)
             db.commit()
         raise HTTPException(400, f"Import failed: {str(e)}")
 
@@ -814,9 +823,9 @@ def import_history(limit: int = Query(50, ge=1, le=500), db: Session = Depends(d
     for job in jobs:
         duration = None
         if job.completed_at and job.started_at:
-            duration = int((job.completed_at - job.started_at).total_seconds())
+            duration = int((ensure_aware(job.completed_at) - ensure_aware(job.started_at)).total_seconds())
         elif job.started_at:
-            duration = int((datetime.now(timezone.utc) - job.started_at).total_seconds())
+            duration = int((datetime.now(timezone.utc) - ensure_aware(job.started_at)).total_seconds())
         
         items.append({
             "import_id": job.import_id,

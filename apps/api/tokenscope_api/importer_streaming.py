@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Callable, Iterator
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -327,6 +327,14 @@ def validate_event(row_dict: dict, mapping: dict[str, str]) -> tuple[dict, list[
         return None, [str(e)]
 
 
+def ensure_aware(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
 class StreamingImporter:
     """Manage large-file import workflow."""
 
@@ -438,33 +446,40 @@ class StreamingImporter:
         if not path.exists():
             raise FileValidationError("File not found in temp storage")
 
-        # Read file
-        with open(path, "rb") as f:
-            raw_data = f.read()
+        if not mapping:
+            raise ImportError("Column mapping is required before committing an import")
 
-        encoding = self.job.detected_encoding if self.job else "UTF-8"
-        content = raw_data.decode(encoding, errors="replace")
-        file_format = self.job.format if self.job else "csv"
-
-        valid_rows = []
-        rejected_rows = []
-        duplicate_skipped = 0
-        processed = 0
-
-        # Parse rows
+        db = SessionLocal()
         try:
+            stmt = select(ImportJob).where(ImportJob.import_id == self.import_id)
+            self.job = db.execute(stmt).scalar_one_or_none()
+            if not self.job:
+                raise FileValidationError("Import not found")
+
+            with open(path, "rb") as f:
+                raw_data = f.read()
+
+            encoding = self.job.detected_encoding or "UTF-8"
+            content = raw_data.decode(encoding, errors="replace")
+            file_format = self.job.format
+
+            pending_rows = []
+            rejected_rows = []
+            duplicate_skipped = 0
+            processed = 0
+            accepted_total = 0
+            inserted_total = 0
+            before_count = db.scalar(select(func.count()).select_from(TelemetryEvent)) or 0
+
             if file_format == "csv":
-                delimiter = self.job.detected_delimiter if self.job else ","
+                delimiter = self.job.detected_delimiter or ","
                 rows_iter = parse_csv_rows(content, delimiter)
             else:
                 rows_iter = parse_json_rows(content)
 
-            db = SessionLocal()
-
             for row_num, row in enumerate(rows_iter, 1):
                 processed = row_num
 
-                # Validate and map row
                 validated, errors = validate_event(row, mapping)
 
                 if errors:
@@ -486,7 +501,6 @@ class StreamingImporter:
                         )
                     continue
 
-                # Check for duplicates
                 if validated.get("event_id"):
                     stmt = select(TelemetryEvent).where(
                         TelemetryEvent.event_id == validated["event_id"]
@@ -499,7 +513,6 @@ class StreamingImporter:
                             continue
                         elif duplicate_handling == "replace":
                             db.delete(existing)
-                            db.commit()
                         elif duplicate_handling == "fail":
                             rejected_rows.append(
                                 {
@@ -509,61 +522,74 @@ class StreamingImporter:
                             )
                             continue
 
-                valid_rows.append(validated)
+                pending_rows.append(validated)
 
-                # Insert in chunks
-                if len(valid_rows) >= chunk_size:
-                    inserted = await self._insert_chunk(db, valid_rows)
-                    valid_rows.clear()
+                if len(pending_rows) >= chunk_size:
+                    inserted_total += self._stage_chunk(db, pending_rows)
+                    accepted_total += len(pending_rows)
+                    pending_rows.clear()
 
                     if progress:
                         progress(
                             {
                                 "status": "importing",
                                 "processed": processed,
-                                "inserted": inserted,
+                                "inserted": inserted_total,
                                 "rejected": len(rejected_rows),
                                 "rate": processed / (processed + 1),
                             }
                         )
 
-            # Insert remaining
-            if valid_rows:
-                inserted = await self._insert_chunk(db, valid_rows)
+            if pending_rows:
+                inserted_total += self._stage_chunk(db, pending_rows)
+                accepted_total += len(pending_rows)
+                pending_rows.clear()
 
-            db.close()
+            after_count = db.scalar(select(func.count()).select_from(TelemetryEvent)) or 0
+            persisted_delta = after_count - before_count
+            if processed > 0 and accepted_total == 0:
+                raise ImportError(f"Import produced zero valid telemetry rows from {processed} source rows. Check column mapping.")
+            if accepted_total > 0 and inserted_total == 0:
+                raise ImportError("Import produced accepted rows but no telemetry rows were staged")
+            if inserted_total != accepted_total:
+                raise ImportError(f"Inserted row count mismatch: accepted {accepted_total}, staged {inserted_total}")
+            if persisted_delta < inserted_total:
+                raise ImportError(f"Telemetry persistence verification failed: expected at least {inserted_total} new rows, found {persisted_delta}")
 
+            self.job.processed_rows = processed
+            self.job.valid_rows = accepted_total
+            self.job.rejected_rows = len(rejected_rows)
+            self.job.duplicate_skipped = duplicate_skipped
+            self.job.inserted_rows = inserted_total
+            self.job.status = "COMPLETED"
+            self.job.completed_at = datetime.now(timezone.utc)
+            self.job.rejected_row_examples = rejected_rows[:100]
+            db.commit()
+            result = {
+                "processed_rows": processed,
+                "valid_rows": accepted_total,
+                "rejected_rows": len(rejected_rows),
+                "duplicate_skipped": duplicate_skipped,
+                "inserted_rows": inserted_total,
+            }
         except ParseError as e:
+            db.rollback()
             raise ImportError(f"Parse error during import: {str(e)}")
-
-        # Update job
-        db = SessionLocal()
-        try:
-            stmt = select(ImportJob).where(ImportJob.import_id == self.import_id)
-            job = db.execute(stmt).scalar_one_or_none()
-            if job:
-                job.processed_rows = processed
-                job.valid_rows = len(valid_rows) + (processed - len(rejected_rows) - duplicate_skipped)
-                job.rejected_rows = len(rejected_rows)
-                job.duplicate_skipped = duplicate_skipped
-                job.inserted_rows = job.valid_rows - duplicate_skipped
-                job.status = "COMPLETED"
-                job.completed_at = datetime.now(timezone.utc)
-                job.rejected_row_examples = rejected_rows[:100]  # Store first 100
-                db.commit()
+        except Exception:
+            db.rollback()
+            raise
         finally:
             db.close()
 
-        # Cleanup temp file
         self.cleanup()
+        return result
 
-        return {
-            "processed_rows": processed,
-            "valid_rows": len(valid_rows),
-            "rejected_rows": len(rejected_rows),
-            "duplicate_skipped": duplicate_skipped,
-            "inserted_rows": len(valid_rows) - duplicate_skipped,
-        }
+    def _stage_chunk(self, db: Session, chunk: list[dict]) -> int:
+        """Stage a chunk of validated events in the active transaction."""
+        events = [TelemetryEvent(**row) for row in chunk]
+        db.add_all(events)
+        db.flush()
+        return len(events)
 
     async def _insert_chunk(self, db: Session, chunk: list[dict]) -> int:
         """Insert a chunk of validated events."""

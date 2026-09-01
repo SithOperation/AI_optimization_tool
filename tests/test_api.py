@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from apps.api.tokenscope_api.database import Base, engine
 from apps.api.tokenscope_api.main import app, clear_telemetry_data
+from apps.api.tokenscope_api.importer_streaming import StreamingImporter
 from apps.api.tokenscope_api.models import ForecastRun, ImportJob, TelemetryEvent
 from apps.api.tokenscope_api.pricing import calculate
 from services.anomaly.engine import detect
@@ -115,6 +116,81 @@ def test_csv_import_preview_and_commit():
         committed=client.post("/api/v1/import",json=payload).json()
         assert committed["accepted"] == 1
         assert committed["rejected"] == 1
+
+def large_import_csv(rows=3):
+    body = ["timestamp,application,provider,model,input_tokens,output_tokens,latency_ms"]
+    for i in range(rows):
+        body.append(f"2026-08-15T12:00:00+00:00,Large Import App,local,llama-3.1-8b,{100+i},20,125")
+    return "\n".join(body).encode("utf-8")
+
+def commit_large_import(client, content, mapping=None, filename="large.csv"):
+    if mapping is None:
+        mapping = {
+            "timestamp": "timestamp",
+            "application": "application",
+            "provider": "provider",
+            "model": "model",
+            "input_tokens": "input_tokens",
+            "output_tokens": "output_tokens",
+            "latency_ms": "latency_ms",
+        }
+    start = client.post("/api/v1/import/start", json={"filename":filename,"file_size":len(content),"format":"csv"}).json()
+    import_id = start["import_id"]
+    upload = client.post(f"/api/v1/import/{import_id}/upload", files={"file": (filename, content, "application/octet-stream")})
+    assert upload.status_code == 200
+    analysis = client.post(f"/api/v1/import/{import_id}/analyze")
+    assert analysis.status_code == 200
+    return import_id, client.post(f"/api/v1/import/{import_id}/commit", json={"import_id":import_id,"mapping":mapping,"duplicate_handling":"skip"})
+
+def test_large_file_commit_persists_telemetry_and_history_counts_are_real():
+    content = large_import_csv(3)
+    with TestClient(app) as client:
+        assert client.delete("/api/v1/telemetry").json()["deleted"]["telemetry_events"] == 0
+        assert client.get("/api/v1/health").json()["events"] == 0
+        import_id, response = commit_large_import(client, content)
+        assert response.status_code == 200
+        result = response.json()
+        assert result["status"] == "COMPLETED"
+        assert result["processed_rows"] == 3
+        assert result["valid_rows"] == 3
+        assert result["inserted_rows"] == 3
+        assert client.get("/api/v1/health").json()["events"] == 3
+        status = client.get(f"/api/v1/import/{import_id}/status").json()
+        assert status["status"] == "COMPLETED"
+        assert status["inserted_rows"] == 3
+        history = client.get("/api/v1/import/history").json()["imports"][0]
+        assert history["status"] == "COMPLETED"
+        assert history["inserted_rows"] == 3
+        assert history["total_rows"] == 3
+
+def test_large_file_empty_mapping_cannot_complete_zero_of_nonzero_rows():
+    content = large_import_csv(2)
+    with TestClient(app) as client:
+        client.delete("/api/v1/telemetry")
+        import_id, response = commit_large_import(client, content, mapping={})
+        assert response.status_code == 400
+        assert "Column mapping is required" in response.json()["detail"]
+        assert client.get("/api/v1/health").json()["events"] == 0
+        status = client.get(f"/api/v1/import/{import_id}/status").json()
+        assert status["status"] == "FAILED"
+        assert status["inserted_rows"] == 0
+        assert status["processed_rows"] == 0
+        assert status["failure_reason"]
+
+def test_large_file_persistence_failure_rolls_back_and_marks_failed(monkeypatch):
+    content = large_import_csv(2)
+    def fail_stage(self, db, chunk):
+        raise RuntimeError("simulated persistence failure")
+    monkeypatch.setattr(StreamingImporter, "_stage_chunk", fail_stage)
+    with TestClient(app) as client:
+        client.delete("/api/v1/telemetry")
+        import_id, response = commit_large_import(client, content)
+        assert response.status_code == 400
+        assert "simulated persistence failure" in response.json()["detail"]
+        assert client.get("/api/v1/health").json()["events"] == 0
+        status = client.get(f"/api/v1/import/{import_id}/status").json()
+        assert status["status"] == "FAILED"
+        assert status["inserted_rows"] == 0
 
 def test_forecast_refuses_insufficient_history():
     with TestClient(app) as client:

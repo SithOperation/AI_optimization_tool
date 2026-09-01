@@ -471,6 +471,16 @@ export class ImportWorkflow {
 
   async startImport() {
     this.duplicateHandling = document.querySelector('#duplicate-handling')?.value || 'skip';
+    document.querySelectorAll('[data-mapping-col]').forEach((sel) => {
+      const col = sel.dataset.mappingCol;
+      const field = sel.value;
+      if (field) {
+        this.manualMapping[col] = field;
+      } else {
+        delete this.manualMapping[col];
+      }
+    });
+    const mapping = Object.keys(this.manualMapping).length ? this.manualMapping : this.autoMapping;
 
     // Show progress panel
     document.querySelector('#upload-zone').style.display = 'none';
@@ -485,7 +495,7 @@ export class ImportWorkflow {
         method: 'POST',
         body: JSON.stringify({
           import_id: this.importId,
-          mapping: this.manualMapping,
+          mapping,
           duplicate_handling: this.duplicateHandling,
         }),
       });
