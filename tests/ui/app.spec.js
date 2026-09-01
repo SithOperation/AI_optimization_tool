@@ -21,7 +21,7 @@ test('first-run wizard renders with private defaults', async ({ page, request })
   await expect(page.getByText('DEMO DATA', { exact: true })).toBeVisible();
 });
 
-test('desktop startup recovery exposes safe actions and retry reaches dashboard', async ({ page, request }) => {
+test('desktop startup recovers after initial fetch failure and retry reaches dashboard', async ({ page, request }) => {
   await completeSetup(request);
   let applicationAttempts = 0;
   await page.route('**/api/v1/application', async route => {
@@ -58,6 +58,20 @@ test('desktop startup recovery exposes safe actions and retry reaches dashboard'
   await page.getByRole('button', { name: 'Retry' }).click();
   await expect(page.getByRole('heading', { name: /Overview/ })).toBeVisible();
   expect(applicationAttempts).toBe(3);
+});
+
+test('installed-style healthy startup reaches dashboard through loopback API', async ({ page, request }) => {
+  await completeSetup(request);
+  await page.addInitScript(() => {
+    window.__TAURI__ = { core: { invoke: async command => {
+      if (command === 'startup_status') return { status: 'HEALTHY', failure: null };
+    } } };
+  });
+  const applicationRequest = page.waitForRequest('http://127.0.0.1:8000/api/v1/application');
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: /Overview/ })).toBeVisible();
+  expect((await applicationRequest).url()).toBe('http://127.0.0.1:8000/api/v1/application');
+  await expect(page.locator('.error-state')).toHaveCount(0);
 });
 
 test('major pages navigate without fatal errors or viewport overflow', async ({ page, request }) => {

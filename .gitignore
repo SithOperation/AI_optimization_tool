@@ -42,3 +42,8 @@ Thumbs.db
 # Logs
 *.log
 npm-debug.log*
+
+# Generated test fixtures (large-file import testing)
+test_*.csv
+test_*.jsonl
+test_*.json
