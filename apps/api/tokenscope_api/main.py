@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import Integer, case, delete, func, select
 from sqlalchemy.orm import Session
 
-from .database import Base, SessionLocal, engine
+from .database import Base, DEFAULT_DB, SessionLocal, engine
 from .app_config import APP_NAME, VERSION, application_data_dir, build_information, configure_logging, ensure_application_directories
 from .demo import generate_demo
 from .importer import parse_import
@@ -36,13 +36,19 @@ from services.analytics.efficiency import efficiency_score
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     configure_logging()
-    ensure_application_directories()
+    paths = ensure_application_directories()
     Base.metadata.create_all(engine)
+    with SessionLocal() as startup_db:
+        telemetry_count = startup_db.scalar(select(func.count()).select_from(TelemetryEvent)) or 0
+    application_logger = logging.getLogger("aiopt.application")
+    application_logger.info("TokenScope data directory: %s", application_data_dir())
+    application_logger.info("TokenScope database: %s", DEFAULT_DB)
+    application_logger.info("Telemetry records: %s", telemetry_count)
     yield
     engine.dispose()
 
 app = FastAPI(title=f"{APP_NAME} API", version=VERSION, lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:5173", "http://127.0.0.1:5173", "tauri://localhost", "https://tauri.localhost"], allow_methods=["GET", "POST", "PUT", "DELETE"], allow_headers=["Content-Type", "X-TokenScope-Key"])
+app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:5173", "http://127.0.0.1:5173", "tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"], allow_methods=["GET", "POST", "PUT", "DELETE"], allow_headers=["Content-Type", "X-TokenScope-Key"])
 rate_limiter=SlidingWindowLimiter(limit=int(os.getenv("TOKENSCOPE_INGEST_RATE_LIMIT","600")))
 logger=logging.getLogger("aiopt.api")
 if not logger.handlers:

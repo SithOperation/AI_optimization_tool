@@ -309,3 +309,9 @@ def test_health_reports_only_checked_services():
         services=client.get("/api/v1/health").json()["services"]
         assert set(services)=={"application","api","database","telemetry_receiver","forecast_engine"}
         assert all(value=={"status":"Healthy","checked":True} for value in services.values())
+
+def test_installed_tauri_origin_is_allowed():
+    with TestClient(app) as client:
+        response=client.options("/api/v1/application",headers={"Origin":"http://tauri.localhost","Access-Control-Request-Method":"GET"})
+        assert response.status_code==200
+        assert response.headers["access-control-allow-origin"]=="http://tauri.localhost"

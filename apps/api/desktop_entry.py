@@ -1,4 +1,14 @@
 import os
+import sys
+
+# PyInstaller's Windows GUI bootloader intentionally provides no console
+# streams. Uvicorn inspects these streams while configuring logging, so give
+# it safe sinks without creating a visible terminal window.
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w", encoding="utf-8")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
 import uvicorn
 from tokenscope_api.main import app
 
