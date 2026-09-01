@@ -99,6 +99,25 @@ def save_event(db: Session, payload: EventCreate):
     db.add(event)
     return event
 
+TELEMETRY_RESET_MODELS = (
+    ("forecast_runs", ForecastRun),
+    ("import_jobs", ImportJob),
+    ("telemetry_events", TelemetryEvent),
+)
+
+def clear_telemetry_data(db: Session, reset_models=TELEMETRY_RESET_MODELS):
+    deleted = {}
+    try:
+        for key, model in reset_models:
+            result = db.execute(delete(model))
+            deleted[key] = result.rowcount or 0
+        audit(db, "telemetry.cleared", "telemetry", details_deleted=deleted)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return {"success": True, "deleted": deleted}
+
 @app.get("/api/v1/health")
 def health(db: Session = Depends(db_session)):
     count = db.scalar(select(func.count()).select_from(TelemetryEvent)) or 0
@@ -155,6 +174,10 @@ def ingest(payload: EventCreate, db: Session = Depends(db_session)):
 def ingest_batch(payload: BatchCreate, db: Session = Depends(db_session)):
     ids = [save_event(db, item).event_id for item in payload.events]; db.commit()
     return {"accepted":len(ids), "event_ids":ids}
+
+@app.delete("/api/v1/telemetry")
+def clear_telemetry(db: Session = Depends(db_session)):
+    return clear_telemetry_data(db)
 
 @app.post("/api/v1/demo", status_code=201)
 def create_demo(days: int = Query(30, ge=7, le=90), db: Session = Depends(db_session)):
@@ -834,4 +857,3 @@ def delete_import_batch(import_id: str, db: Session = Depends(db_session)):
     
     audit(db, "import.batch_deleted", "import", import_id, rows_deleted=deleted.rowcount)
     return {"import_id": import_id, "deleted_rows": deleted.rowcount}
-

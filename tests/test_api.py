@@ -3,7 +3,8 @@ from datetime import datetime, timedelta, timezone
 from fastapi.testclient import TestClient
 
 from apps.api.tokenscope_api.database import Base, engine
-from apps.api.tokenscope_api.main import app
+from apps.api.tokenscope_api.main import app, clear_telemetry_data
+from apps.api.tokenscope_api.models import ForecastRun, ImportJob, TelemetryEvent
 from apps.api.tokenscope_api.pricing import calculate
 from services.anomaly.engine import detect
 from apps.api.tokenscope_api.app_config import DATA_SUBDIRECTORIES, VERSION, ensure_application_directories
@@ -25,6 +26,57 @@ def test_event_is_costed_and_aggregated():
         assert data["totals"]["requests"] == 1
         assert data["totals"]["tokens"] == 1100
         assert data["totals"]["spend"] > 0
+
+def test_clear_telemetry_endpoint_removes_telemetry_imports_and_derived_data_but_preserves_configuration():
+    with TestClient(app) as client:
+        client.put("/api/v1/application/setup",json={"choice":"local","privacy":{}})
+        client.put("/api/v1/settings/retention",json={"days":90})
+        client.post("/api/v1/budgets",json={"name":"Keep me","scope_type":"organization","scope_value":None,"period":"monthly","amount":100,"currency":"USD","active":True})
+        client.post("/api/v1/integrations",json={"kind":"ollama","name":"Local Ollama","base_url":"http://localhost:11434","collect_user_identifiers":False})
+        client.put("/api/v1/cloud-providers/openai",json={"provider":"openai","enabled":True,"credential_env_var":"TEST_OPENAI_KEY","endpoint":None})
+        client.post("/api/v1/events",json={"application":"Reset App","provider":"local","model":"llama-3.1-8b","input_tokens":100,"output_tokens":20})
+
+        from apps.api.tokenscope_api.database import SessionLocal
+        with SessionLocal() as db:
+            db.add(ForecastRun(metric="total_tokens",horizon_days=7,selected_model="Naive",training_start="2026-08-01",training_end="2026-08-21",training_points=21,error_value=0,backtest_results=[],history_values=[],forecast_values=[],drivers=[]))
+            db.add(ImportJob(import_id="import-reset-test",filename="reset.csv",file_size=10,format="csv",status="COMPLETED",rejected_rows=1,rejected_row_examples=[{"row":2,"error":"bad"}]))
+            db.commit()
+
+        response = client.delete("/api/v1/telemetry")
+        assert response.status_code == 200
+        assert response.json()["success"] is True
+        assert response.json()["deleted"] == {"forecast_runs":1,"import_jobs":1,"telemetry_events":1}
+        assert client.get("/api/v1/health").json()["events"] == 0
+        assert client.get("/api/v1/import/history").json()["count"] == 0
+        assert client.get("/api/v1/overview").json()["is_empty"] is True
+        assert client.get("/api/v1/settings/retention").json()["days"] == 90
+        assert client.get("/api/v1/settings/privacy").json()["collect_token_counts"] is True
+        assert client.get("/api/v1/budgets").json()["budgets"][0]["name"] == "Keep me"
+        assert client.get("/api/v1/integrations").json()["configured"][0]["name"] == "Local Ollama"
+        cloud = client.get("/api/v1/cloud-providers").json()
+        openai = next(item for item in cloud["catalog"] if item["provider"] == "openai")
+        assert openai["configuration"]["enabled"] is True
+
+def test_clear_telemetry_endpoint_is_idempotent_when_empty():
+    with TestClient(app) as client:
+        response = client.delete("/api/v1/telemetry")
+        assert response.status_code == 200
+        assert response.json()["deleted"] == {"forecast_runs":0,"import_jobs":0,"telemetry_events":0}
+
+def test_clear_telemetry_rolls_back_if_any_delete_fails():
+    from apps.api.tokenscope_api.database import SessionLocal
+    with SessionLocal() as db:
+        db.add(TelemetryEvent(application="Rollback App",provider="local",model="llama-3.1-8b",input_tokens=100,total_tokens=100))
+        db.add(ForecastRun(metric="total_tokens",horizon_days=7,selected_model="Naive",training_start="2026-08-01",training_end="2026-08-21",training_points=21,error_value=0,backtest_results=[],history_values=[],forecast_values=[],drivers=[]))
+        db.commit()
+        try:
+            clear_telemetry_data(db, reset_models=(("forecast_runs", ForecastRun), ("broken", object)))
+        except Exception:
+            pass
+        else:
+            raise AssertionError("clear_telemetry_data should have failed")
+        assert db.query(ForecastRun).count() == 1
+        assert db.query(TelemetryEvent).count() == 1
 
 def test_invalid_tokens_rejected():
     payload = {"application":"App","provider":"local","model":"test","input_tokens":-1}
@@ -287,7 +339,7 @@ def test_application_directories_and_version(tmp_path):
     paths=ensure_application_directories(tmp_path)
     assert set(paths)==set(DATA_SUBDIRECTORIES)
     assert all(path.is_dir() for path in paths.values())
-    assert VERSION=="0.13.0"
+    assert VERSION=="0.14.0"
 
 def test_first_run_completion_privacy_and_mode_persistence():
     with TestClient(app) as client:

@@ -103,6 +103,66 @@ test('application modes switch and persist', async ({ page, request }) => {
   await expect(page.locator('.mode-engineering')).toBeVisible();
 });
 
+test('settings telemetry reset requires confirmation and refreshes clean baseline', async ({ page, request }) => {
+  await completeSetup(request);
+  let deleteCalls = 0;
+  let cleared = false;
+  await page.route('**/api/v1/telemetry', async route => {
+    deleteCalls += 1;
+    cleared = true;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ success: true, deleted: { telemetry_events: 1, import_jobs: 1, forecast_runs: 1 } }),
+    });
+  });
+  await page.route('**/api/v1/overview?**', async route => {
+    if (!cleared) return route.continue();
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ period_days: 30, is_empty: true, is_demo: false, totals: { requests: 0, tokens: 0, spend: 0, average_latency_ms: 0, success_rate: 0 }, models: [], applications: [], timeseries: [] }),
+    });
+  });
+  await page.goto('/#settings');
+  await expect(page.getByRole('button', { name: 'Clear Telemetry Data' })).toBeVisible();
+  await page.getByRole('button', { name: 'Clear Telemetry Data' }).click();
+  await expect(page.getByRole('dialog', { name: 'Clear Telemetry Data' })).toBeVisible();
+  await expect(page.getByText('This permanently removes imported telemetry and telemetry-derived analysis from this device. Application settings and configuration will be preserved.')).toBeVisible();
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  expect(deleteCalls).toBe(0);
+  await page.getByRole('button', { name: 'Clear Telemetry Data' }).click();
+  const telemetryDelete = page.waitForRequest(req => req.method() === 'DELETE' && req.url().endsWith('/api/v1/telemetry'));
+  await page.getByRole('button', { name: 'Clear Telemetry', exact: true }).click();
+  await telemetryDelete;
+  await expect(page.getByText('Telemetry cleared. Baseline restored.')).toBeVisible();
+  expect(deleteCalls).toBe(1);
+  await page.goto('/#overview');
+  await expect(page.getByRole('heading', { name: 'Welcome to TokenScope' })).toBeVisible();
+});
+
+test('telemetry reset cannot double-submit and shows readable API errors', async ({ page, request }) => {
+  await completeSetup(request);
+  let deleteCalls = 0;
+  await page.route('**/api/v1/telemetry', async route => {
+    deleteCalls += 1;
+    await new Promise(resolve => setTimeout(resolve, 300));
+    await route.fulfill({
+      status: 422,
+      contentType: 'application/json',
+      body: JSON.stringify({ detail: [{ loc: ['body', 'telemetry'], msg: 'Field required', type: 'missing' }] }),
+    });
+  });
+  await page.goto('/#settings');
+  await page.getByRole('button', { name: 'Clear Telemetry Data' }).click();
+  const confirm = page.getByRole('button', { name: 'Clear Telemetry', exact: true });
+  await confirm.dblclick();
+  await expect(page.getByRole('button', { name: 'Clearing...' })).toBeDisabled();
+  await expect(page.getByText('Field required: telemetry')).toBeVisible();
+  await expect(page.getByText('[object Object]')).toHaveCount(0);
+  expect(deleteCalls).toBe(1);
+});
+
 test('long telemetry values remain contained', async ({ page, request }) => {
   await completeSetup(request);
   const long = suffix => `release-candidate-${suffix}-with-an-intentionally-long-value-that-must-not-break-layout`;
