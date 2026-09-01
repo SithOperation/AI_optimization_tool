@@ -22,6 +22,12 @@ database/sqlite/*
 node_modules/
 dist/
 .vite/
+src-tauri/target/
+src-tauri/gen/schemas/
+src-tauri/binaries/*.exe
+!src-tauri/binaries/.gitkeep
+build/
+*.spec
 
 # Editors and operating systems
 .idea/

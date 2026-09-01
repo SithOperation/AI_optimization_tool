@@ -3,8 +3,9 @@ from pathlib import Path
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
+from .app_config import application_data_dir, ensure_application_directories
 
-DEFAULT_DB = Path(__file__).resolve().parents[3] / "database" / "sqlite" / "tokenscope.db"
+DEFAULT_DB = ensure_application_directories(application_data_dir())["database"] / "ai-optimization-tool.db"
 DATABASE_URL = os.getenv("TOKENSCOPE_DATABASE_URL", f"sqlite:///{DEFAULT_DB.as_posix()}")
 
 if DATABASE_URL.startswith("sqlite:///"):

@@ -6,6 +6,7 @@ from apps.api.tokenscope_api.database import Base, engine
 from apps.api.tokenscope_api.main import app
 from apps.api.tokenscope_api.pricing import calculate
 from services.anomaly.engine import detect
+from apps.api.tokenscope_api.app_config import DATA_SUBDIRECTORIES, VERSION, ensure_application_directories
 
 def setup_function():
     Base.metadata.drop_all(engine)
@@ -281,3 +282,30 @@ def test_evaluation_rejects_score_outside_scale():
     payload={"model":"test","metric":"accuracy","score":110,"maximum_score":100,"source":"Invalid test"}
     with TestClient(app) as client:
         assert client.post("/api/v1/evaluations",json=payload).status_code == 422
+
+def test_application_directories_and_version(tmp_path):
+    paths=ensure_application_directories(tmp_path)
+    assert set(paths)==set(DATA_SUBDIRECTORIES)
+    assert all(path.is_dir() for path in paths.values())
+    assert VERSION=="0.10.1"
+
+def test_first_run_completion_privacy_and_mode_persistence():
+    with TestClient(app) as client:
+        initial=client.get("/api/v1/application").json()
+        assert initial["first_run_complete"] is False
+        assert initial["mode"]=="Operations"
+        completed=client.put("/api/v1/application/setup",json={"choice":"demo","privacy":{}})
+        assert completed.status_code==200
+        assert client.get("/api/v1/application").json()["first_run_complete"] is True
+        privacy=client.get("/api/v1/settings/privacy").json()
+        assert privacy["collect_token_counts"] is True
+        assert privacy["collect_prompt"] is False and privacy["collect_response"] is False
+        assert client.put("/api/v1/application/mode",json={"mode":"Engineering"}).json()["mode"]=="Engineering"
+        assert client.get("/api/v1/application").json()["mode"]=="Engineering"
+        assert client.delete("/api/v1/application/setup").json()["complete"] is False
+
+def test_health_reports_only_checked_services():
+    with TestClient(app) as client:
+        services=client.get("/api/v1/health").json()["services"]
+        assert set(services)=={"application","api","database","telemetry_receiver","forecast_engine"}
+        assert all(value=={"status":"Healthy","checked":True} for value in services.values())

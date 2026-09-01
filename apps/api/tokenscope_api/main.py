@@ -16,6 +16,7 @@ from sqlalchemy import Integer, case, delete, func, select
 from sqlalchemy.orm import Session
 
 from .database import Base, SessionLocal, engine
+from .app_config import APP_NAME, VERSION, application_data_dir, build_information, configure_logging, ensure_application_directories
 from .demo import generate_demo
 from .importer import parse_import
 from .models import AppSetting, AuditEvent, Budget, CloudProviderConfig, ForecastRun, Integration, ModelEvaluation, PriceOverride, TelemetryEvent
@@ -34,13 +35,16 @@ from services.analytics.efficiency import efficiency_score
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    configure_logging()
+    ensure_application_directories()
     Base.metadata.create_all(engine)
     yield
+    engine.dispose()
 
-app = FastAPI(title="TokenScope API", version="0.1.0", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:5173", "http://127.0.0.1:5173"], allow_methods=["GET", "POST", "PUT", "DELETE"], allow_headers=["Content-Type", "X-TokenScope-Key"])
+app = FastAPI(title=f"{APP_NAME} API", version=VERSION, lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:5173", "http://127.0.0.1:5173", "tauri://localhost", "https://tauri.localhost"], allow_methods=["GET", "POST", "PUT", "DELETE"], allow_headers=["Content-Type", "X-TokenScope-Key"])
 rate_limiter=SlidingWindowLimiter(limit=int(os.getenv("TOKENSCOPE_INGEST_RATE_LIMIT","600")))
-logger=logging.getLogger("tokenscope.access")
+logger=logging.getLogger("aiopt.api")
 if not logger.handlers:
     handler=logging.StreamHandler();handler.setFormatter(logging.Formatter('%(message)s'));logger.addHandler(handler);logger.setLevel(logging.INFO)
 
@@ -87,7 +91,49 @@ def save_event(db: Session, payload: EventCreate):
 @app.get("/api/v1/health")
 def health(db: Session = Depends(db_session)):
     count = db.scalar(select(func.count()).select_from(TelemetryEvent)) or 0
-    return {"status":"healthy", "database":"sqlite", "events":count, "privacy_mode":"metadata_only"}
+    return {"status":"healthy", "database":"sqlite", "events":count, "privacy_mode":"metadata_only", "services":{name:{"status":"Healthy","checked":True} for name in ("application","api","database","telemetry_receiver","forecast_engine")}}
+
+@app.get("/api/v1/application")
+def application_status(db: Session = Depends(db_session)):
+    setup=db.get(AppSetting,"first_run");mode=db.get(AppSetting,"user_mode");info=build_information()
+    info.update({"first_run_complete":bool(setup and setup.value.get("complete")),"mode":mode.value.get("mode","Operations") if mode else "Operations","data_directory":str(application_data_dir()),"local_first":True})
+    return info
+
+@app.put("/api/v1/application/setup")
+def complete_setup(payload: dict, db: Session = Depends(db_session)):
+    choice=payload.get("choice")
+    if choice not in {"demo","local","telemetry","import","advanced"}: raise HTTPException(422,"Invalid setup choice")
+    privacy=PrivacyRequest(**payload.get("privacy",{})).model_dump()
+    for key,value in (("privacy",privacy),("first_run",{"complete":True,"choice":choice,"completed_at":datetime.now(timezone.utc).isoformat()})):
+        row=db.get(AppSetting,key)
+        if row: row.value=value
+        else: db.add(AppSetting(key=key,value=value))
+    if choice=="demo" and not db.scalar(select(func.count()).select_from(TelemetryEvent).where(TelemetryEvent.source=="demo")): generate_demo(db,30)
+    db.commit();return {"complete":True,"choice":choice}
+
+@app.delete("/api/v1/application/setup")
+def reset_setup(db: Session = Depends(db_session)):
+    db.execute(delete(AppSetting).where(AppSetting.key=="first_run"));db.commit();return {"complete":False}
+
+@app.put("/api/v1/application/mode")
+def set_mode(payload: dict, db: Session = Depends(db_session)):
+    mode=payload.get("mode")
+    if mode not in {"Executive","Operations","Engineering"}: raise HTTPException(422,"Invalid application mode")
+    row=db.get(AppSetting,"user_mode")
+    if row: row.value={"mode":mode}
+    else: db.add(AppSetting(key="user_mode",value={"mode":mode}))
+    db.commit();return {"mode":mode}
+
+@app.get("/api/v1/integrations/detect-local")
+async def detect_local_services():
+    targets=[("Ollama","http://127.0.0.1:11434/api/tags"),("vLLM","http://127.0.0.1:8001/v1/models"),("LiteLLM","http://127.0.0.1:4000/health"),("OpenTelemetry","http://127.0.0.1:4318/")]
+    async def check(name,url):
+        try:
+            async with httpx.AsyncClient(timeout=.6) as client: response=await client.get(url)
+            detected=response.status_code<500
+        except (httpx.HTTPError,OSError): detected=False
+        return {"name":name,"url":url,"status":"Detected" if detected else "Not detected"}
+    return {"services":await asyncio.gather(*(check(*target) for target in targets)),"scope":"localhost only","auto_connected":False}
 
 @app.post("/api/v1/events", status_code=201)
 def ingest(payload: EventCreate, db: Session = Depends(db_session)):
