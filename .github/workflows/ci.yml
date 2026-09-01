@@ -21,3 +21,61 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm audit --audit-level=high
+  windows-release-candidate:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11", cache: pip}
+      - uses: actions/setup-node@v4
+        with: {node-version: "22", cache: npm}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: python -m venv .venv
+      - run: .\.venv\Scripts\python.exe -m pip install -r apps\api\requirements.txt pyinstaller pip-audit cyclonedx-bom
+      - run: npm ci
+      - run: npm run release:verify-version
+      - run: .\.venv\Scripts\python.exe -m pytest -q
+      - run: .\.venv\Scripts\python.exe -m compileall -q apps services integrations packages
+      - run: npm run build
+      - run: npm audit --audit-level=high
+      - run: cargo fmt --manifest-path src-tauri\Cargo.toml -- --check
+      - run: cargo check --manifest-path src-tauri\Cargo.toml
+      - run: npm run backend:package
+      - run: powershell -ExecutionPolicy Bypass -File scripts\smoke-packaged-backend.ps1
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:ui
+      - run: npm run desktop:build
+      - run: npm run release:checksum
+      - run: npm run release:sbom
+      - run: .\.venv\Scripts\pip-audit.exe -r apps\api\requirements.txt
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit --file src-tauri\Cargo.lock
+      - name: Microsoft Defender installer scan
+        shell: powershell
+        run: |
+          $installer = Get-ChildItem src-tauri\target\release\bundle\nsis -Filter '*0.12.0*-setup.exe' | Select-Object -First 1
+          if (-not $installer) { throw 'Installer was not generated.' }
+          $scanner = Join-Path $env:ProgramFiles 'Windows Defender\MpCmdRun.exe'
+          if (Test-Path $scanner) { & $scanner -Scan -ScanType 3 -File $installer.FullName; if ($LASTEXITCODE -gt 1) { throw "Defender scan failed: $LASTEXITCODE" } }
+          else { Write-Warning 'Microsoft Defender command-line scanner is unavailable on this runner.' }
+      - name: Collect release-candidate artifacts
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force artifacts\installer | Out-Null
+          Copy-Item src-tauri\target\release\bundle\nsis\*.exe artifacts\installer\
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AI-Optimization-Tool-0.12.0-windows-rc
+          path: |
+            artifacts/installer/*.exe
+            artifacts/*SHA256.txt
+            artifacts/sbom/*.json
+            playwright-report/
+          if-no-files-found: error
+          retention-days: 14

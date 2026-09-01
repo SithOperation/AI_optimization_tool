@@ -4,6 +4,8 @@ Tauri 2 wraps the existing Vite frontend and starts FastAPI as a child process. 
 
 Development uses Python plus Vite. Production uses a real PyInstaller one-file backend placed at `src-tauri/binaries/aiopt-backend.exe`; end users need no Python, Node, Git, or Docker. `scripts/package-backend.ps1` performs that build and collects StatsForecast assets.
 
-The Rust shell polls the checked FastAPI health endpoint for up to 30 seconds, detects early backend exit, and does not finish native setup until the API reports healthy. Production still needs finalized icons, certificate signing, and diagnostics export.
+The Rust shell polls the checked FastAPI health endpoint for up to 30 seconds, detects early backend exit, and does not finish native setup until the API reports healthy. Automated packaged-backend smoke tests cover health, forecasting, Scenario Lab, loopback binding, database initialization, and cleanup. Production still needs an approved final brand asset, Authenticode signing, and diagnostics export/open-logs UI.
 
 StatsForecast uses Numba's bundled `workqueue` threading layer in packaged builds. The optional `tbbpool` module is excluded because its external `tbb12.dll` runtime is not otherwise required; packaged forecast smoke tests cover this choice.
+
+The frontend contains no remotely hosted runtime scripts, CSS, fonts, icons, or analytics. It uses system font fallbacks and remains usable offline. The Tauri content security policy allows only bundled styles/fonts and the loopback API.

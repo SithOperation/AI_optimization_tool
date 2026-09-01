@@ -1,0 +1,37 @@
+# v0.12 release checklist
+
+- [ ] Clean git state and intended release commit recorded
+- [ ] Version synchronized with `VERSION`
+- [ ] Python tests pass
+- [ ] Python compile checks pass
+- [ ] Frontend production build passes
+- [ ] npm audit reviewed
+- [ ] cargo fmt and cargo check pass
+- [ ] PyInstaller backend packaged from clean source
+- [ ] Packaged health/database/loopback/cleanup smoke passes
+- [ ] Packaged forecast works
+- [ ] Packaged Scenario Lab works
+- [ ] Playwright UI and screenshot regression checks pass
+- [ ] Tauri release build passes
+- [ ] NSIS installer generated with expected version
+- [ ] Installer size is non-zero and plausible
+- [ ] SHA-256 checksum generated and verified
+- [ ] Python, npm, and Rust SBOMs generated
+- [ ] Python, npm, and Rust security scans reviewed
+- [ ] Installer malware scan reviewed
+- [ ] Installer installed on clean Windows profile/VM
+- [ ] Application runs without system Python, Node, or Docker
+- [ ] First-run wizard and privacy defaults validated
+- [ ] Forecasting and Scenario Lab validated in installed mode
+- [ ] Mode switching and restart persistence validated
+- [ ] Upgrade from prior version preserves data/configuration
+- [ ] Uninstall removes program files/shortcuts/processes
+- [ ] Uninstall preserves application data by default
+- [ ] Reinstall detects compatible preserved data
+- [ ] All pages checked at 1920x1080 and 1100x700
+- [ ] Display scaling checks completed where available
+- [ ] Long-value layout checks pass
+- [ ] Startup failure shows useful recovery UI
+- [ ] Final icon/branding approved or blocker documented
+- [ ] Authenticode signature and timestamp verified
+- [ ] Final installer, checksum, SBOMs, and logs archived

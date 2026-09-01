@@ -2,7 +2,7 @@
 
 AI Optimization Tool is a free, open-source, local-first application for understanding, forecasting, and optimizing AI usage. Core analytics work entirely on the local machine. Paid API keys and cloud integrations are optional.
 
-Version 0.10 establishes the installable desktop foundation: application-data standards, a Tauri shell, packaged-Python backend architecture, first-run setup, privacy-safe defaults, and Executive, Operations, and Engineering views. Development installer builds are unsigned.
+Version 0.12 is the Windows release-candidate hardening release: reproducible packaging, packaged-backend smoke tests, two-size UI regression coverage, Windows CI, checksums, and multi-ecosystem SBOMs. Development installer builds remain unsigned.
 
 ## Developer quick start
 
@@ -31,5 +31,7 @@ npm run desktop:build
 ```
 
 Artifacts appear under `src-tauri\target\release\bundle\nsis\`. See [desktop architecture](docs/desktop.md) and [installation](docs/installation.md).
+
+Before distributing a release candidate, follow [the release process](docs/release-process.md) and [release checklist](docs/release-checklist.md). `VERSION` is the authoritative application version; run `npm run release:verify-version` to validate every manifest.
 
 Desktop user data lives outside the installation directory under `%LOCALAPPDATA%\AIOptimizationTool\`. See [application standards](docs/application-standards.md), [data storage](docs/data-storage.md), and [privacy](docs/privacy.md). Apache-2.0 licensed.

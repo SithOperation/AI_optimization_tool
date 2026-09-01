@@ -25,3 +25,47 @@
   min-width: 0;
   max-width: 100%;
 }
+
+.panel,
+.pricing-layout > *,
+.model-layout > *,
+.model-row > *,
+.analytics-row > * {
+  min-width: 0;
+}
+
+.model-row strong,
+.model-row small,
+.analytics-row strong,
+.analytics-row span {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 1200px) {
+  .model-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .model-row {
+    grid-template-columns: 20px minmax(0, 1fr) repeat(2, minmax(0, .7fr));
+  }
+
+  .model-row span:nth-of-type(n+3),
+  .model-row em {
+    display: none;
+  }
+}
+
+@media (max-width: 1050px) {
+  .shell {
+    grid-template-columns: 72px minmax(0, 1fr);
+  }
+}
+.shell {
+  grid-template-columns: 230px minmax(0, 1fr);
+  max-width: 100%;
+}
+
+.shell > main {
+  min-width: 0;
+}

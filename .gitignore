@@ -28,6 +28,10 @@ src-tauri/binaries/*.exe
 !src-tauri/binaries/.gitkeep
 build/
 *.spec
+artifacts/
+.test-data/
+playwright-report/
+test-results/
 
 # Editors and operating systems
 .idea/
