@@ -29,7 +29,7 @@ try {
         & $SignTool sign /fd SHA256 /f $CertificatePath /p $CertificatePassword /tr $TimestampUrl /td SHA256 $Target
         if ($LASTEXITCODE -ne 0) { throw "Authenticode signing failed for $Target" }
         $Signature = Get-AuthenticodeSignature -LiteralPath $Target
-        if ($Signature.Status -ne 'Valid') { throw "Signature validation failed for $Target: $($Signature.Status)" }
+        if ($Signature.Status -ne 'Valid') { throw "Signature validation failed for ${Target}: $($Signature.Status)" }
     }
 }
 finally {
