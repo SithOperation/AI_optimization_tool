@@ -52,6 +52,23 @@ fn wait_for_backend(child: &mut Child, timeout: Duration) -> Result<(), String> 
     ))
 }
 
+fn terminate_backend(mut child: Child) {
+    #[cfg(target_os = "windows")]
+    {
+        // PyInstaller one-file executables create a worker beneath the launcher.
+        // Terminate the owned tree while the launcher PID still identifies it.
+        let _ = Command::new("taskkill")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn development_python() -> PathBuf {
     let venv = development_root()
         .join(".venv")
@@ -112,8 +129,7 @@ fn main() {
                 .stderr(Stdio::null())
                 .spawn()?;
             if let Err(error) = wait_for_backend(&mut child, Duration::from_secs(30)) {
-                let _ = child.kill();
-                let _ = child.wait();
+                terminate_backend(child);
                 return Err(error.into());
             }
             app.manage(Backend(Mutex::new(Some(child))));
@@ -125,9 +141,8 @@ fn main() {
         if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
             if let Some(state) = handle.try_state::<Backend>() {
                 if let Ok(mut guard) = state.0.lock() {
-                    if let Some(mut child) = guard.take() {
-                        let _ = child.kill();
-                        let _ = child.wait();
+                    if let Some(child) = guard.take() {
+                        terminate_backend(child);
                     }
                 }
             }
