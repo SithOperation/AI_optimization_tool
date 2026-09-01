@@ -145,3 +145,32 @@ class ModelEvaluation(Base):
     sample_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
     source: Mapped[str] = mapped_column(String(200))
     notes: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+
+
+class ImportJob(Base):
+    """Tracks large-file telemetry import jobs."""
+
+    __tablename__ = "import_jobs"
+
+    import_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    filename: Mapped[str] = mapped_column(String(255))
+    file_size: Mapped[int] = mapped_column(Integer)  # bytes
+    format: Mapped[str] = mapped_column(String(10))  # "csv" or "json"
+    status: Mapped[str] = mapped_column(String(20), index=True)  # UPLOADED, ANALYZING, READY, IMPORTING, COMPLETED, FAILED, CANCELLED
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    total_rows: Mapped[int] = mapped_column(Integer, default=0)
+    processed_rows: Mapped[int] = mapped_column(Integer, default=0)
+    valid_rows: Mapped[int] = mapped_column(Integer, default=0)
+    rejected_rows: Mapped[int] = mapped_column(Integer, default=0)
+    inserted_rows: Mapped[int] = mapped_column(Integer, default=0)
+    error_count: Mapped[int] = mapped_column(Integer, default=0)
+    mapping: Mapped[dict] = mapped_column(JSON, default=dict)  # Column to field mapping
+    duplicate_skipped: Mapped[int] = mapped_column(Integer, default=0)
+    cancelled: Mapped[bool] = mapped_column(Boolean, default=False)
+    failure_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    detected_encoding: Mapped[str] = mapped_column(String(20), default="UTF-8")
+    detected_delimiter: Mapped[str | None] = mapped_column(String(5), nullable=True)
+    sample_rows: Mapped[list] = mapped_column(JSON, default=list)  # First N rows for preview
+    rejected_row_examples: Mapped[list] = mapped_column(JSON, default=list)  # Rejection details

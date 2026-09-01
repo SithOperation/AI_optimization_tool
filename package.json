@@ -11,6 +11,7 @@
     "desktop:build": "tauri build",
     "backend:package": "powershell -ExecutionPolicy Bypass -File scripts/package-backend.ps1",
     "test:ui": "playwright test",
+    "test:api-base": "node --test tests/api-base.test.mjs",
     "test:ui:update": "playwright test --update-snapshots",
     "release:verify-version": "powershell -ExecutionPolicy Bypass -File scripts/verify-version.ps1",
     "release:checksum": "powershell -ExecutionPolicy Bypass -File scripts/checksum-installer.ps1",

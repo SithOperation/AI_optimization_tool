@@ -8,8 +8,9 @@ import json
 import logging
 import os
 from urllib.parse import urlparse
+from uuid import uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, UploadFile, File
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import Integer, case, delete, func, select
@@ -19,9 +20,10 @@ from .database import Base, DEFAULT_DB, SessionLocal, engine
 from .app_config import APP_NAME, VERSION, application_data_dir, build_information, configure_logging, ensure_application_directories
 from .demo import generate_demo
 from .importer import parse_import
-from .models import AppSetting, AuditEvent, Budget, CloudProviderConfig, ForecastRun, Integration, ModelEvaluation, PriceOverride, TelemetryEvent
+from .importer_streaming import StreamingImporter, export_rejected_rows_csv
+from .models import AppSetting, AuditEvent, Budget, CloudProviderConfig, ForecastRun, ImportJob, Integration, ModelEvaluation, PriceOverride, TelemetryEvent
 from .pricing import calculate, get_price, registry
-from .schemas import AdapterEvent, BatchCreate, BudgetCreate, CloudProviderRequest, EventCreate, ImportRequest, IntegrationRequest, LocalCloudRequest, MigrationRequest, ModelEvaluationCreate, PriceOverrideCreate, PrivacyRequest, RetentionRequest, ScenarioRequest
+from .schemas import AdapterEvent, BatchCreate, BudgetCreate, CloudProviderRequest, EventCreate, FileUploadStart, ImportCommit, ImportHistoryItem, ImportJobStatus, ImportRequest, ImportPreview, IntegrationRequest, LocalCloudRequest, MigrationRequest, ModelEvaluationCreate, PriceOverrideCreate, PrivacyRequest, RetentionRequest, ScenarioRequest
 from services.forecasting.engine import METRICS, InsufficientHistory, explain_drivers, run_forecast
 from services.anomaly.engine import detect
 from services.optimizer.engine import recommendations
@@ -56,8 +58,11 @@ if not logger.handlers:
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
-    if request.headers.get("content-length") and int(request.headers["content-length"]) > 5_000_000:
-        return JSONResponse({"detail":"Request body exceeds 5 MB"},status_code=413)
+    # Allow large files for import endpoints (up to 500 MB), but enforce 5 MB limit for normal API
+    is_import_upload = request.url.path.startswith("/api/v1/import/") and "/upload" in request.url.path
+    max_size = 500_000_000 if is_import_upload else 5_000_000
+    if request.headers.get("content-length") and int(request.headers["content-length"]) > max_size:
+        return JSONResponse({"detail":f"Request body exceeds {max_size / 1_000_000:.0f} MB"},status_code=413)
     configured_key=os.getenv("TOKENSCOPE_API_KEY")
     if configured_key and request.url.path.startswith("/api/v1") and request.url.path!="/api/v1/health" and request.headers.get("X-TokenScope-Key")!=configured_key:
         return JSONResponse({"detail":"Authentication required"},status_code=401)
@@ -562,3 +567,271 @@ def delete_evaluation(evaluation_id:str,db:Session=Depends(db_session)):
     row=db.get(ModelEvaluation,evaluation_id)
     if not row: raise HTTPException(404,"Evaluation not found")
     audit(db,"model_evaluation.deleted","evaluation",evaluation_id,model=row.model);db.delete(row);db.commit();return {"deleted":evaluation_id}
+
+
+# ==================== LARGE-FILE IMPORT ENDPOINTS ====================
+
+@app.post("/api/v1/import/start", status_code=201)
+def start_import(payload: FileUploadStart, db: Session = Depends(db_session)):
+    """Initiate a large file import. Returns import_id for subsequent operations."""
+    from .importer_streaming import validate_file_metadata
+    
+    try:
+        validate_file_metadata(payload.filename, payload.file_size, payload.format)
+    except Exception as e:
+        raise HTTPException(400, str(e))
+    
+    # Create import job record
+    import_id = str(uuid4())
+    job = ImportJob(
+        import_id=import_id,
+        filename=payload.filename,
+        file_size=payload.file_size,
+        format=payload.format,
+        status="UPLOADED"
+    )
+    db.add(job)
+    audit(db, "import.started", "import", import_id, filename=payload.filename, file_size=payload.file_size, format=payload.format)
+    db.commit()
+    
+    return {"import_id": import_id, "status": "UPLOADED", "max_file_size_mb": 500}
+
+
+@app.post("/api/v1/import/{import_id}/upload")
+async def upload_chunk(import_id: str, file: UploadFile = File(...), db: Session = Depends(db_session)):
+    """Upload a file chunk for large import."""
+    # Validate import exists
+    job = db.get(ImportJob, import_id)
+    if not job:
+        raise HTTPException(404, "Import not found")
+    if job.status not in ["UPLOADED", "ANALYZING"]:
+        raise HTTPException(400, f"Cannot upload to import in {job.status} status")
+    
+    # Read and store chunk
+    importer = StreamingImporter(import_id)
+    try:
+        chunk = await file.read()
+        await importer.receive_file_chunk(chunk)
+    except Exception as e:
+        raise HTTPException(400, f"File upload error: {str(e)}")
+    
+    return {"uploaded": len(chunk), "import_id": import_id}
+
+
+@app.post("/api/v1/import/{import_id}/analyze")
+async def analyze_import(import_id: str, db: Session = Depends(db_session)):
+    """Analyze uploaded file: detect format, encoding, delimiter, row count."""
+    job = db.get(ImportJob, import_id)
+    if not job:
+        raise HTTPException(404, "Import not found")
+    if job.status != "UPLOADED":
+        raise HTTPException(400, f"Cannot analyze import in {job.status} status")
+    
+    # Update status
+    job.status = "ANALYZING"
+    db.commit()
+    
+    try:
+        importer = StreamingImporter(import_id)
+        analysis = await importer.analyze_file(job.filename, job.format)
+        
+        # Update job with analysis results
+        job = db.get(ImportJob, import_id)
+        if job:
+            job.total_rows = analysis["total_rows"]
+            job.detected_encoding = analysis["detected_encoding"]
+            job.detected_delimiter = analysis["detected_delimiter"]
+            job.sample_rows = analysis["sample_rows"]
+            job.status = "READY"
+            db.commit()
+        
+        # Generate auto-mapping
+        auto_mapping = {}
+        if job.format == "csv" and analysis["sample_rows"]:
+            from .importer_streaming import auto_map_columns
+            headers = list(analysis["sample_rows"][0].keys())
+            auto_mapping = auto_map_columns(headers)
+        
+        return {
+            "import_id": import_id,
+            "status": "READY",
+            "total_rows": analysis["total_rows"],
+            "detected_encoding": analysis["detected_encoding"],
+            "detected_delimiter": analysis["detected_delimiter"],
+            "sample_rows": analysis["sample_rows"][:25],
+            "auto_mapping": auto_mapping,
+            "validation_summary": analysis["validation_summary"]
+        }
+    except Exception as e:
+        job.status = "FAILED"
+        job.failure_reason = str(e)
+        db.commit()
+        raise HTTPException(400, f"Analysis failed: {str(e)}")
+
+
+@app.get("/api/v1/import/{import_id}/status")
+def get_import_status(import_id: str, db: Session = Depends(db_session)):
+    """Get current status and progress of an import."""
+    job = db.get(ImportJob, import_id)
+    if not job:
+        raise HTTPException(404, "Import not found")
+    
+    progress_percent = 0
+    if job.total_rows > 0:
+        progress_percent = min(100, int(job.processed_rows / job.total_rows * 100))
+    
+    rate = 0.0
+    if job.processed_rows > 0 and job.started_at:
+        elapsed = (datetime.now(timezone.utc) - job.started_at).total_seconds()
+        if elapsed > 0:
+            rate = job.processed_rows / elapsed
+    
+    return {
+        "import_id": import_id,
+        "filename": job.filename,
+        "file_size": job.file_size,
+        "format": job.format,
+        "status": job.status,
+        "created_at": job.created_at,
+        "started_at": job.started_at,
+        "completed_at": job.completed_at,
+        "total_rows": job.total_rows,
+        "processed_rows": job.processed_rows,
+        "valid_rows": job.valid_rows,
+        "rejected_rows": job.rejected_rows,
+        "inserted_rows": job.inserted_rows,
+        "duplicate_skipped": job.duplicate_skipped,
+        "error_count": job.error_count,
+        "cancelled": job.cancelled,
+        "failure_reason": job.failure_reason,
+        "progress_percent": progress_percent,
+        "rate_rows_per_sec": round(rate, 2)
+    }
+
+
+@app.post("/api/v1/import/{import_id}/commit")
+async def commit_import(import_id: str, payload: ImportCommit, db: Session = Depends(db_session)):
+    """Start the actual import process."""
+    job = db.get(ImportJob, import_id)
+    if not job:
+        raise HTTPException(404, "Import not found")
+    if job.status != "READY":
+        raise HTTPException(400, f"Cannot start import in {job.status} status")
+    
+    # Update status
+    job.status = "IMPORTING"
+    job.started_at = datetime.now(timezone.utc)
+    job.mapping = payload.mapping
+    db.commit()
+    
+    try:
+        importer = StreamingImporter(import_id)
+        results = await importer.execute_import(
+            mapping=payload.mapping,
+            duplicate_handling=payload.duplicate_handling,
+            chunk_size=1000
+        )
+        
+        return {
+            "import_id": import_id,
+            "status": "COMPLETED",
+            "processed_rows": results["processed_rows"],
+            "valid_rows": results["valid_rows"],
+            "rejected_rows": results["rejected_rows"],
+            "inserted_rows": results["inserted_rows"],
+            "duplicate_skipped": results["duplicate_skipped"]
+        }
+    except Exception as e:
+        job = db.get(ImportJob, import_id)
+        if job:
+            job.status = "FAILED"
+            job.failure_reason = str(e)
+            db.commit()
+        raise HTTPException(400, f"Import failed: {str(e)}")
+
+
+@app.delete("/api/v1/import/{import_id}/cancel")
+def cancel_import(import_id: str, db: Session = Depends(db_session)):
+    """Cancel an in-progress or pending import."""
+    job = db.get(ImportJob, import_id)
+    if not job:
+        raise HTTPException(404, "Import not found")
+    if job.status not in ["UPLOADED", "ANALYZING", "READY", "IMPORTING"]:
+        raise HTTPException(400, f"Cannot cancel import in {job.status} status")
+    
+    importer = StreamingImporter(import_id)
+    importer.cancel()
+    
+    audit(db, "import.cancelled", "import", import_id)
+    return {"import_id": import_id, "status": "CANCELLED"}
+
+
+@app.get("/api/v1/import/{import_id}/rejected")
+def get_rejected_rows(import_id: str, include_values: bool = Query(False), db: Session = Depends(db_session)):
+    """Export rejected rows as CSV."""
+    job = db.get(ImportJob, import_id)
+    if not job:
+        raise HTTPException(404, "Import not found")
+    if not job.rejected_row_examples:
+        return Response("", media_type="text/csv")
+    
+    csv_content = export_rejected_rows_csv(import_id, include_values)
+    filename = f"rejected-rows-{import_id[:8]}.csv"
+    return Response(csv_content, media_type="text/csv", headers={"Content-Disposition": f"attachment; filename={filename}"})
+
+
+@app.get("/api/v1/import/history")
+def import_history(limit: int = Query(50, ge=1, le=500), db: Session = Depends(db_session)):
+    """List past import jobs."""
+    jobs = db.execute(
+        select(ImportJob).order_by(ImportJob.created_at.desc()).limit(limit)
+    ).scalars().all()
+    
+    items = []
+    for job in jobs:
+        duration = None
+        if job.completed_at and job.started_at:
+            duration = int((job.completed_at - job.started_at).total_seconds())
+        elif job.started_at:
+            duration = int((datetime.now(timezone.utc) - job.started_at).total_seconds())
+        
+        items.append({
+            "import_id": job.import_id,
+            "filename": job.filename,
+            "file_size": job.file_size,
+            "format": job.format,
+            "status": job.status,
+            "created_at": job.created_at,
+            "completed_at": job.completed_at,
+            "duration_seconds": duration,
+            "total_rows": job.total_rows,
+            "inserted_rows": job.inserted_rows,
+            "rejected_rows": job.rejected_rows,
+            "error_count": job.error_count
+        })
+    
+    return {"imports": items, "count": len(items)}
+
+
+@app.delete("/api/v1/import/{import_id}")
+def delete_import_batch(import_id: str, db: Session = Depends(db_session)):
+    """Delete all telemetry events from a specific import."""
+    job = db.get(ImportJob, import_id)
+    if not job:
+        raise HTTPException(404, "Import not found")
+    if job.status not in ["COMPLETED", "FAILED", "CANCELLED"]:
+        raise HTTPException(400, f"Can only delete completed, failed, or cancelled imports")
+    
+    # Delete all events from this import (marked by source="import" and timestamp matching job window)
+    deleted = db.execute(
+        delete(TelemetryEvent).where(
+            TelemetryEvent.source == "import",
+            TelemetryEvent.timestamp >= job.created_at,
+            TelemetryEvent.timestamp <= (job.completed_at or datetime.now(timezone.utc))
+        )
+    )
+    db.commit()
+    
+    audit(db, "import.batch_deleted", "import", import_id, rows_deleted=deleted.rowcount)
+    return {"import_id": import_id, "deleted_rows": deleted.rowcount}
+

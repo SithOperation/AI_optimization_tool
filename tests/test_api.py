@@ -312,6 +312,7 @@ def test_health_reports_only_checked_services():
 
 def test_installed_tauri_origin_is_allowed():
     with TestClient(app) as client:
-        response=client.options("/api/v1/application",headers={"Origin":"http://tauri.localhost","Access-Control-Request-Method":"GET"})
+        response=client.options("/api/v1/application",headers={"Origin":"http://tauri.localhost","Access-Control-Request-Method":"GET","Access-Control-Request-Headers":"content-type"})
         assert response.status_code==200
         assert response.headers["access-control-allow-origin"]=="http://tauri.localhost"
+        assert "content-type" in response.headers["access-control-allow-headers"].lower()

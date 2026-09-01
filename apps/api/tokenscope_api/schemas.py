@@ -188,3 +188,81 @@ class ModelEvaluationCreate(BaseModel):
         if self.score < 0 or self.score > self.maximum_score:
             raise ValueError("score must be between zero and maximum_score")
         return self
+
+
+class FileUploadStart(BaseModel):
+    """Initiate a large file import."""
+    filename: str = Field(min_length=1, max_length=255)
+    file_size: int = Field(gt=0, le=500_000_000)  # 500 MB limit
+    format: Literal["csv", "json"]
+
+
+class ColumnMapping(BaseModel):
+    """Maps CSV/JSON columns to EventCreate fields."""
+    mapping: dict[str, str]  # {csv_column: event_field}
+    duplicate_handling: Literal["skip", "replace", "fail"] = "skip"
+
+
+class ImportPreview(BaseModel):
+    """Analysis of file before import commit."""
+    import_id: str
+    filename: str
+    file_size: int
+    format: str
+    total_rows: int
+    detected_encoding: str
+    detected_delimiter: str | None
+    sample_rows: list[dict]  # First 25-100 rows
+    validation_summary: dict  # {valid_rows, rejected_rows, warnings}
+
+
+class ImportJobStatus(BaseModel):
+    """Status of an in-progress or completed import."""
+    import_id: str
+    filename: str
+    file_size: int
+    format: str
+    status: Literal["UPLOADED", "ANALYZING", "READY", "IMPORTING", "COMPLETED", "FAILED", "CANCELLED"]
+    created_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+    total_rows: int
+    processed_rows: int
+    valid_rows: int
+    rejected_rows: int
+    inserted_rows: int
+    error_count: int
+    duplicate_skipped: int
+    cancelled: bool
+    failure_reason: str | None
+    progress_percent: int = 0
+    rate_rows_per_sec: float = 0
+
+
+class ImportHistoryItem(BaseModel):
+    """Summary of past import for history view."""
+    import_id: str
+    filename: str
+    file_size: int
+    format: str
+    status: str
+    created_at: datetime
+    completed_at: datetime | None
+    duration_seconds: int | None
+    total_rows: int
+    inserted_rows: int
+    rejected_rows: int
+    error_count: int
+
+
+class RejectedRowExport(BaseModel):
+    """Details for exporting rejected rows."""
+    import_id: str
+    include_values: bool = False  # Include original values or just error info
+
+
+class ImportCommit(BaseModel):
+    """Start the actual import after preview and mapping."""
+    import_id: str
+    mapping: dict[str, str]  # Final confirmed mapping
+    duplicate_handling: Literal["skip", "replace", "fail"] = "skip"
