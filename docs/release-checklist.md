@@ -1,4 +1,4 @@
-# v0.12 release checklist
+# v0.13 release checklist
 
 - [ ] Clean git state and intended release commit recorded
 - [ ] Version synchronized with `VERSION`

@@ -29,4 +29,4 @@ Use a disposable Windows VM or clean local profile whenever possible. Record Win
 - Retry after removing the condition.
 - After normal close, first-run close, backend error, and uninstall, verify no owned application/backend process remains. Ignore unrelated Python, Node, Cargo, or Rust processes.
 
-Current limitation: the fatal UI provides Retry and View Details, but Open Logs is not implemented.
+The v0.13 recovery screen provides Retry, sanitized View Details, Open Logs, and Exit. Automated Chromium coverage runs at device scale factors 100%, 125%, 150%, and 200% using the minimum 1100x700 viewport. Before public distribution, repeat the pass on a physical or virtual Windows desktop because browser device scaling is not identical to Windows WebView2 DPI scaling.

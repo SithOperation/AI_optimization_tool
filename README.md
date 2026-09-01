@@ -2,7 +2,7 @@
 
 AI Optimization Tool is a free, open-source, local-first application for understanding, forecasting, and optimizing AI usage. Core analytics work entirely on the local machine. Paid API keys and cloud integrations are optional.
 
-Version 0.12 is the Windows release-candidate hardening release: reproducible packaging, packaged-backend smoke tests, two-size UI regression coverage, Windows CI, checksums, and multi-ecosystem SBOMs. Development installer builds remain unsigned.
+Version 0.13 is the public-release preparation release: recoverable desktop startup, reproducible packaging, packaged-backend smoke tests, UI regression coverage, Windows CI, checksums, and multi-ecosystem SBOMs. Development installer builds remain unsigned.
 
 ## Developer quick start
 

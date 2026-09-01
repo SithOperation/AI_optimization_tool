@@ -9,3 +9,5 @@ Commercial provider configuration stores environment-variable names—not values
 Retention never deletes automatically. Administrators configure a window and invoke a separate apply endpoint. Configuration changes appear in the local audit log.
 
 Release-candidate CI runs `pip-audit`, `npm audit`, and `cargo audit`, calculates a SHA-256 installer checksum, and uses Microsoft Defender when its command-line scanner is available. Dependency and malware results must be reviewed before distribution. CI artifacts contain build outputs and dependency manifests only; application telemetry and secrets are never uploaded.
+
+Rust advisory classifications and retained upstream debt are recorded in `docs/rust-security-debt.md`. Authenticode preparation and secret-handling requirements are recorded in `docs/code-signing.md`.

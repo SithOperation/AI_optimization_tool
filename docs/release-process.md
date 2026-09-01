@@ -24,3 +24,7 @@ The installer is written to `src-tauri/target/release/bundle/nsis/`. The checksu
 ## Publishing boundary
 
 CI builds and retains release-candidate artifacts for 14 days but does not publish a GitHub Release. Publishing requires an intentional version tag, completed checklist, clean-machine validation, approved icon, Authenticode signing/timestamping, malware review, and signature verification.
+
+## Branding status
+
+The repository contains one working 256x256 Windows ICO at `src-tauri/icons/icon.ico` and no separately approved production brand package. Tauri uses this resource consistently for the executable, window/taskbar, installer, and shortcut. It remains a temporary release asset; do not replace it with invented artwork. Final brand approval is required before public v1.0 distribution.

@@ -21,6 +21,37 @@ test('first-run wizard renders with private defaults', async ({ page, request })
   await expect(page.getByText('DEMO DATA', { exact: true })).toBeVisible();
 });
 
+test('desktop startup recovery exposes safe actions and retry reaches dashboard', async ({ page, request }) => {
+  await completeSetup(request);
+  await page.addInitScript(() => {
+    let phase = 'failed';
+    window.__TAURI__ = { core: { invoke: async command => {
+      if (command === 'startup_status') {
+        if (phase === 'healthy') return { status: 'HEALTHY', failure: null };
+        return { status: 'FAILED', failure: {
+          category: 'PORT_IN_USE', summary: 'Port 8000 is already in use by another process.',
+          timestamp_unix: 1788220800, backend_executable: 'C:\\Program Files\\AI Optimization Tool\\binaries\\aiopt-backend.exe',
+          bind_address: '127.0.0.1:8000', health_check: 'The application refused to attach.',
+          child_exit_code: null, application_version: '0.13.0',
+        } };
+      }
+      if (command === 'open_logs') return 'C:\\Users\\test\\AppData\\Local\\AIOptimizationTool\\logs';
+      if (command === 'retry_backend') { phase = 'healthy'; return; }
+      if (command === 'exit_application') { window.__exitRequested = true; return; }
+    } } };
+  });
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Unable to start local services.' })).toBeVisible();
+  await expect(page.getByText('Your telemetry data has not been deleted.')).toBeVisible();
+  await page.getByRole('button', { name: 'View Details' }).click();
+  await expect(page.getByText('PORT_IN_USE')).toBeVisible();
+  await expect(page.getByText('127.0.0.1:8000')).toBeVisible();
+  await page.getByRole('button', { name: 'Open Logs' }).click();
+  await expect(page.getByRole('status')).toContainText('AIOptimizationTool');
+  await page.getByRole('button', { name: 'Retry' }).click();
+  await expect(page.getByRole('heading', { name: /Overview/ })).toBeVisible();
+});
+
 test('major pages navigate without fatal errors or viewport overflow', async ({ page, request }) => {
   await completeSetup(request);
   const errors = [];

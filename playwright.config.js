@@ -29,5 +29,8 @@ export default defineConfig({
   projects: [
     { name: 'desktop-1920', use: { browserName: 'chromium', viewport: { width: 1920, height: 1080 } } },
     { name: 'minimum-1100', use: { browserName: 'chromium', viewport: { width: 1100, height: 700 } } },
+    { name: 'scale-125', use: { browserName: 'chromium', viewport: { width: 1100, height: 700 }, deviceScaleFactor: 1.25 } },
+    { name: 'scale-150', use: { browserName: 'chromium', viewport: { width: 1100, height: 700 }, deviceScaleFactor: 1.5 } },
+    { name: 'scale-200', use: { browserName: 'chromium', viewport: { width: 1100, height: 700 }, deviceScaleFactor: 2 } },
   ],
 });

@@ -69,3 +69,21 @@
 .shell > main {
   min-width: 0;
 }
+
+.recovery-state { width: min(720px, calc(100vw - 40px)); padding: 36px; }
+.recovery-icon { display: grid; place-items: center; width: 48px; height: 48px; margin: 16px auto; border: 1px solid var(--red); border-radius: 50%; color: var(--red); font-size: 24px; }
+.recovery-state h1 { margin: 8px 0; }
+.recovery-summary { margin: 20px 0; padding: 14px; border: 1px solid #5a4528; border-radius: 7px; background: #34291c; color: #ffd097; overflow-wrap: anywhere; }
+.recovery-actions { display: flex; justify-content: center; gap: 9px; flex-wrap: wrap; }
+.recovery-details { margin-top: 20px; text-align: left; border-top: 1px solid var(--line); padding-top: 10px; }
+.recovery-details dl { margin: 0; }
+.recovery-details div { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.recovery-details dt { color: var(--muted); }
+.recovery-details dd { margin: 0; font-family: monospace; overflow-wrap: anywhere; }
+.recovery-feedback { min-height: 20px; color: var(--green); overflow-wrap: anywhere; }
+
+@media (max-width: 600px) {
+  .recovery-state { padding: 22px; }
+  .recovery-details div { grid-template-columns: 1fr; gap: 3px; }
+  .recovery-actions button { flex: 1 1 42%; }
+}

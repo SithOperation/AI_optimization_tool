@@ -19,8 +19,9 @@ dependencies = [
 
 [[package]]
 name = "ai-optimization-tool"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
+ "serde",
  "tauri",
  "tauri-build",
  "tauri-plugin-shell",
