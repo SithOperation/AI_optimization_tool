@@ -1,0 +1,27 @@
+.price-form,
+.evaluation-form {
+  min-width: 0;
+}
+
+.price-form > div {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.evaluation-form > div {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.price-form > label,
+.price-form > div label,
+.evaluation-form > label,
+.evaluation-form > div label {
+  min-width: 0;
+}
+
+.price-form input,
+.evaluation-form input,
+.evaluation-form select {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}

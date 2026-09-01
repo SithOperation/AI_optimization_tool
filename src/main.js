@@ -9,6 +9,7 @@ import './settings.css';
 import './reports.css';
 import './models.css';
 import './application.css';
+import './layout-fixes.css';
 
 const API=import.meta.env.VITE_API_URL||'http://127.0.0.1:8000/api/v1';
 const state={page:location.hash.slice(1)||'overview',days:+localStorage.getItem('ts-days')||30,filters:JSON.parse(localStorage.getItem('ts-filters')||'{}'),data:null,options:{},application:null,loading:true,error:null,group:'application',forecastMetric:'total_tokens',forecastHorizon:30,wizardStep:1,wizardChoice:'demo'};let liveSource;
