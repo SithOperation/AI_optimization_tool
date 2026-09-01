@@ -12,12 +12,13 @@ import './application.css';
 import './layout-fixes.css';
 import './import.css';
 import { resolveApiBase } from './api-base.js';
+import { apiRequest } from './api-client.js';
 import { ImportWorkflow } from './import-workflow.js';
 
 const API=resolveApiBase({mode:import.meta.env.MODE,viteApiUrl:import.meta.env.VITE_API_URL,isTauri:Boolean(window.__TAURI__||window.__TAURI_INTERNALS__)});
 const state={page:location.hash.slice(1)||'overview',days:+localStorage.getItem('ts-days')||30,filters:JSON.parse(localStorage.getItem('ts-filters')||'{}'),data:null,options:{},application:null,loading:true,error:null,startup:null,group:'application',forecastMetric:'total_tokens',forecastHorizon:30,wizardStep:1,wizardChoice:'demo'};let liveSource;
 const money=new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',maximumFractionDigits:4}),num=new Intl.NumberFormat('en-US',{notation:'compact',maximumFractionDigits:1});
-async function api(path,options={}){const headers={...options.headers};if(options.body&&!headers['Content-Type'])headers['Content-Type']='application/json';const r=await fetch(API+path,{...options,headers});const body=await r.json();if(!r.ok)throw new Error(body.detail||`Request failed (${r.status})`);return body}
+const api=(path,options={})=>apiRequest(API,path,options);
 const desktopInvoke=window.__TAURI__?.core?.invoke||window.__TAURI_INTERNALS__?.invoke;
 const escapeHtml=value=>String(value??'').replace(/[&<>'"]/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
 async function checkDesktopStartup(){if(!desktopInvoke){load();return}try{const snapshot=await desktopInvoke('startup_status');state.startup=snapshot;if(snapshot.status==='HEALTHY'){state.startup=null;loadAfterDesktopStartup();return}state.loading=snapshot.status==='STARTING';render();if(snapshot.status==='STARTING')setTimeout(checkDesktopStartup,400)}catch(error){state.loading=false;state.startup={status:'FAILED',failure:{category:'STARTUP_STATE_UNAVAILABLE',summary:'The desktop startup state could not be read.',health_check:String(error),application_version:'0.13.0'}};render()}}

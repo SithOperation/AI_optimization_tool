@@ -3,6 +3,12 @@
  * Handles upload, analysis, mapping, preview, and progress tracking.
  */
 
+export function createUploadFormData(file, chunk) {
+  const formData = new FormData();
+  formData.append('file', chunk, file.name);
+  return formData;
+}
+
 export class ImportWorkflow {
   constructor(api, money, num) {
     this.api = api;
@@ -338,7 +344,7 @@ export class ImportWorkflow {
 
       this.importId = start.import_id;
 
-      // Upload file in chunks
+      // Upload file in chunks. The backend appends each multipart payload.
       const chunkSize = 5_000_000; // 5 MB chunks
       const chunks = Math.ceil(file.size / chunkSize);
 
@@ -347,8 +353,7 @@ export class ImportWorkflow {
         const end_idx = Math.min(start_idx + chunkSize, file.size);
         const chunk = file.slice(start_idx, end_idx);
 
-        const formData = new FormData();
-        formData.append('file', chunk);
+        const formData = createUploadFormData(file, chunk);
 
         await this.api(`/import/${this.importId}/upload`, {
           method: 'POST',
@@ -359,7 +364,7 @@ export class ImportWorkflow {
       // Analyze file
       await this.analyzeFile();
     } catch (error) {
-      alert(`Upload error: ${error.message}`);
+      alert(`Upload failed: ${error.message}`);
       this.reset();
     }
   }
