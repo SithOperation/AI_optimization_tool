@@ -1,0 +1,78 @@
+/* Readability refinements: loaded last to normalize the legacy page-specific styles. */
+html, body { max-width: 100%; overflow-x: clip; }
+body { font-size: 15px; line-height: 1.45; }
+main { padding: 24px 32px; }
+header { margin-bottom: 24px; gap: 16px; }
+h1 { font-size: clamp(30px, 2.2vw, 34px); line-height: 1.15; margin: 0 0 6px; }
+header p:not(.eyebrow) { font-size: 15px; max-width: 70ch; }
+.panel h2 { font-size: 19px; line-height: 1.25; }
+.eyebrow { font-size: 12px; letter-spacing: .04em; }
+button, select, input, textarea { font-size: 14px; min-height: 38px; }
+button { padding: 9px 14px; }
+.primary { font-weight: 700; box-shadow: 0 4px 14px #70e3b426; }
+.secondary { color: var(--muted); }
+
+.shell { grid-template-columns: 248px minmax(0, 1fr); }
+aside { padding: 20px 16px; overflow-y: auto; }
+.brand { padding: 0 8px 20px; }
+.brand small, .collector small { font-size: 11px; letter-spacing: .04em; }
+nav { gap: 4px; }
+nav a { min-height: 38px; padding: 7px 12px; font-size: 15px; }
+nav a.active { color: #fff; background: #172a26; box-shadow: inset 3px 0 var(--green); }
+nav i { width: 12px; font-size: 12px; }
+nav a:nth-child(11), nav a:nth-child(13) { margin-top: 8px; padding-top: 11px; border-top: 1px solid var(--line); border-radius: 0 0 7px 7px; }
+.collector strong { font-size: 13px; }
+
+.metrics { gap: 12px; }
+.metric { padding: 16px; }
+.metric-top p, .trend, .data-badge { font-size: 13px; letter-spacing: 0; }
+.metric h3 { font-size: clamp(28px, 2.2vw, 34px); margin: 10px 0 6px; }
+.metric h3 small, .metric small { font-size: 13px; }
+.panel { padding: 16px; box-shadow: 0 5px 18px #0002; }
+.help, .notice, .empty-inline, footer, .tag, .live { font-size: 13px; letter-spacing: 0; }
+.security-strip small, .cloud-row small, .cloud-row label, .credential,
+.audit-list > div:not(.empty-inline), .button-link, .tr, .tr.th,
+.tr span:first-child small, .tr > strong, .tr > em, .rec div strong,
+.rec div small, .forecast-total small, .forecast-total em,
+.legend, .chart-foot, .budget-ring small, .budget-row, .alert p,
+.controls label > span, .controls label b, .scenario-results small,
+.scenario-results > p, .strategy, .strategy em { font-size: 13px; letter-spacing: 0; }
+.grid-main, .lower-grid, .settings-grid, .audit-panel { margin-top: 12px; }
+
+.import-workflow { gap: 16px; }
+.import-upload { max-width: 920px; width: 100%; }
+.upload-zone { padding: 32px 24px; border-width: 1px; }
+.zone-content { gap: 10px; }
+.zone-content h2 { margin: 0; font-size: 22px; }
+.upload-icon { width: 38px; height: 38px; opacity: .8; }
+.zone-title { font-size: 16px; font-weight: 500; }
+.zone-subtitle { font-size: 14px; }
+.history-panel { max-width: 920px; }
+.history-panel .panel-head p { margin: 3px 0 12px; color: var(--muted); font-size: 14px; }
+.history-item { padding: 12px 14px; gap: 16px; border: 0; border-radius: 6px; }
+.history-info { min-width: 0; }
+.history-info strong { font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-info time { display: block; color: var(--muted); font-size: 13px; }
+.history-stats { gap: 16px; font-size: 14px; }
+.status { font-size: 13px; letter-spacing: 0; text-transform: none; border-radius: 999px; }
+
+.setting-toggle { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin: 16px 0; padding: 12px; border-radius: 7px; background: #0c1715; }
+.setting-toggle span, .setting-toggle strong, .setting-toggle small { display: block; }
+.setting-toggle small { margin-top: 3px; color: var(--muted); font-size: 13px; }
+.setting-toggle input { width: 20px; min-height: 20px; accent-color: var(--green); }
+
+@media (max-width: 1500px) {
+  main { padding: 24px; }
+  .shell { grid-template-columns: 232px minmax(0, 1fr); }
+}
+
+@media (max-width: 1200px) {
+  .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .grid-main, .lower-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 210px minmax(0, 1fr); }
+  main { padding: 20px 16px; }
+  .header-actions { flex-wrap: wrap; justify-content: flex-end; }
+}

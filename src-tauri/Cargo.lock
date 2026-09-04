@@ -22,6 +22,7 @@ name = "ai-optimization-tool"
 version = "0.14.0"
 dependencies = [
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-shell",

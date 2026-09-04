@@ -1,15 +1,22 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     io::{Read, Write},
     net::TcpStream,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicBool, AtomicU32, Ordering},
+        Mutex,
+    },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tauri::{AppHandle, Manager, RunEvent};
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::TrayIconBuilder,
+    AppHandle, Manager, RunEvent, WindowEvent,
+};
 
 const ADDRESS: &str = "127.0.0.1:8000";
 
@@ -44,16 +51,54 @@ struct BackendRuntime {
     status: StartupStatus,
     failure: Option<StartupFailure>,
 }
-struct Backend(Mutex<BackendRuntime>);
+struct Backend {
+    runtime: Mutex<BackendRuntime>,
+    owned_pid: AtomicU32,
+    shutting_down: AtomicBool,
+}
 
 impl Backend {
     fn starting() -> Self {
-        Self(Mutex::new(BackendRuntime {
-            child: None,
-            status: StartupStatus::Failed,
-            failure: None,
-        }))
+        Self {
+            runtime: Mutex::new(BackendRuntime {
+                child: None,
+                status: StartupStatus::Failed,
+                failure: None,
+            }),
+            owned_pid: AtomicU32::new(0),
+            shutting_down: AtomicBool::new(false),
+        }
     }
+}
+
+#[derive(Default, Deserialize, Serialize)]
+struct LifecyclePreferences {
+    keep_running_in_tray: bool,
+}
+
+struct Lifecycle(Mutex<LifecyclePreferences>);
+
+fn preferences_path(app: &AppHandle) -> Option<PathBuf> {
+    app.path()
+        .app_config_dir()
+        .ok()
+        .map(|path| path.join("lifecycle.json"))
+}
+
+fn load_preferences(app: &AppHandle) -> LifecyclePreferences {
+    preferences_path(app)
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default()
+}
+
+fn save_preferences(app: &AppHandle, preferences: &LifecyclePreferences) -> Result<(), String> {
+    let path = preferences_path(app).ok_or("Application settings directory is unavailable")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let json = serde_json::to_string_pretty(preferences).map_err(|error| error.to_string())?;
+    std::fs::write(path, json).map_err(|error| error.to_string())
 }
 
 fn failure(
@@ -146,6 +191,40 @@ fn terminate_backend(mut child: Child) {
     #[cfg(not(target_os = "windows"))]
     let _ = child.kill();
     let _ = child.wait();
+}
+
+#[cfg(target_os = "windows")]
+fn terminate_pid(pid: u32) {
+    if pid == 0 {
+        return;
+    }
+    let _ = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(not(target_os = "windows"))]
+fn terminate_pid(_pid: u32) {}
+
+fn shutdown_owned_backend(app: &AppHandle) {
+    let Some(state) = app.try_state::<Backend>() else {
+        return;
+    };
+    state.shutting_down.store(true, Ordering::SeqCst);
+    let child = state
+        .runtime
+        .lock()
+        .ok()
+        .and_then(|mut runtime| runtime.child.take());
+    if let Some(child) = child {
+        state.owned_pid.store(0, Ordering::SeqCst);
+        terminate_backend(child);
+    } else {
+        terminate_pid(state.owned_pid.swap(0, Ordering::SeqCst));
+    }
 }
 
 fn wait_for_backend(
@@ -252,7 +331,21 @@ fn attempt_backend_start(app: &AppHandle) -> Result<Child, StartupFailure> {
                 error.raw_os_error(),
             )
         })?;
+    let backend = app.state::<Backend>();
+    backend.owned_pid.store(child.id(), Ordering::SeqCst);
+    if backend.shutting_down.load(Ordering::SeqCst) {
+        backend.owned_pid.store(0, Ordering::SeqCst);
+        terminate_backend(child);
+        return Err(failure(
+            "APPLICATION_EXITING",
+            "The application exited while the local backend was starting.",
+            &executable,
+            "Startup was cancelled.",
+            None,
+        ));
+    }
     if let Err(error) = wait_for_backend(&mut child, &executable, Duration::from_secs(30)) {
+        backend.owned_pid.store(0, Ordering::SeqCst);
         terminate_backend(child);
         return Err(error);
     }
@@ -292,12 +385,29 @@ mod tests {
         assert_eq!(result.category, "HEALTH_TIMEOUT");
         terminate_backend(child);
     }
+
+    #[test]
+    fn tray_mode_is_opt_in() {
+        assert!(!LifecyclePreferences::default().keep_running_in_tray);
+    }
+
+    #[test]
+    fn lifecycle_preferences_round_trip() {
+        let json = serde_json::to_string(&LifecyclePreferences {
+            keep_running_in_tray: true,
+        })
+        .expect("preferences should serialize");
+        let restored: LifecyclePreferences =
+            serde_json::from_str(&json).expect("preferences should deserialize");
+        assert!(restored.keep_running_in_tray);
+    }
 }
 
 fn schedule_backend_start(app: AppHandle) {
+    let backend = app.state::<Backend>();
+    backend.shutting_down.store(false, Ordering::SeqCst);
     let previous = {
-        let state = app.state::<Backend>();
-        let Ok(mut runtime) = state.0.lock() else {
+        let Ok(mut runtime) = backend.runtime.lock() else {
             return;
         };
         if matches!(runtime.status, StartupStatus::Starting) && runtime.failure.is_none() {
@@ -313,14 +423,20 @@ fn schedule_backend_start(app: AppHandle) {
     thread::spawn(move || {
         let result = attempt_backend_start(&app);
         let state = app.state::<Backend>();
-        if let Ok(mut runtime) = state.0.lock() {
+        if let Ok(mut runtime) = state.runtime.lock() {
             match result {
                 Ok(child) => {
-                    runtime.child = Some(child);
-                    runtime.status = StartupStatus::Healthy;
-                    runtime.failure = None;
+                    if state.shutting_down.load(Ordering::SeqCst) {
+                        state.owned_pid.store(0, Ordering::SeqCst);
+                        terminate_backend(child);
+                    } else {
+                        runtime.child = Some(child);
+                        runtime.status = StartupStatus::Healthy;
+                        runtime.failure = None;
+                    }
                 }
                 Err(error) => {
+                    state.owned_pid.store(0, Ordering::SeqCst);
                     runtime.child = None;
                     runtime.status = StartupStatus::Failed;
                     runtime.failure = Some(error);
@@ -332,7 +448,7 @@ fn schedule_backend_start(app: AppHandle) {
 
 #[tauri::command]
 fn startup_status(state: tauri::State<'_, Backend>) -> StartupSnapshot {
-    let mut runtime = state.0.lock().expect("backend state lock poisoned");
+    let mut runtime = state.runtime.lock().expect("backend state lock poisoned");
     if matches!(runtime.status, StartupStatus::Healthy) {
         let exit = runtime
             .child
@@ -340,6 +456,7 @@ fn startup_status(state: tauri::State<'_, Backend>) -> StartupSnapshot {
             .and_then(|child| child.try_wait().ok().flatten())
             .and_then(|status| status.code());
         if exit.is_some() {
+            state.owned_pid.store(0, Ordering::SeqCst);
             let executable = PathBuf::from("binaries").join("aiopt-backend.exe");
             runtime.child = None;
             runtime.status = StartupStatus::Failed;
@@ -362,7 +479,7 @@ fn startup_status(state: tauri::State<'_, Backend>) -> StartupSnapshot {
 fn retry_backend(app: AppHandle) -> Result<(), String> {
     let starting = matches!(
         app.state::<Backend>()
-            .0
+            .runtime
             .lock()
             .map_err(|_| "Backend state is unavailable")?
             .status,
@@ -393,38 +510,107 @@ fn open_logs() -> Result<String, String> {
 
 #[tauri::command]
 fn exit_application(app: AppHandle) {
+    shutdown_owned_backend(&app);
     app.exit(0)
+}
+
+#[tauri::command]
+fn get_keep_running_in_tray(state: tauri::State<'_, Lifecycle>) -> bool {
+    state
+        .0
+        .lock()
+        .map(|value| value.keep_running_in_tray)
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+fn set_keep_running_in_tray(
+    app: AppHandle,
+    state: tauri::State<'_, Lifecycle>,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut preferences = state
+        .0
+        .lock()
+        .map_err(|_| "Lifecycle settings are unavailable")?;
+    preferences.keep_running_in_tray = enabled;
+    save_preferences(&app, &preferences)
+}
+
+fn restore_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
 }
 
 fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.set_focus();
-            }
+            restore_main_window(app);
         }))
         .manage(Backend::starting())
         .invoke_handler(tauri::generate_handler![
             startup_status,
             retry_backend,
             open_logs,
-            exit_application
+            exit_application,
+            get_keep_running_in_tray,
+            set_keep_running_in_tray
         ])
         .setup(|app| {
+            app.manage(Lifecycle(Mutex::new(load_preferences(app.handle()))));
+            let open =
+                MenuItem::with_id(app, "open", "Open AI Optimization Tool", true, None::<&str>)?;
+            let exit = MenuItem::with_id(app, "exit", "Exit", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&open, &exit])?;
+            let mut tray = TrayIconBuilder::with_id("main-tray")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "open" => restore_main_window(app),
+                    "exit" => {
+                        shutdown_owned_backend(app);
+                        app.exit(0);
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let tauri::tray::TrayIconEvent::DoubleClick { .. } = event {
+                        restore_main_window(tray.app_handle());
+                    }
+                });
+            if let Some(icon) = app.default_window_icon().cloned() {
+                tray = tray.icon(icon);
+            }
+            tray.build(app)?;
             schedule_backend_start(app.handle().clone());
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("failed to build desktop application");
-    app.run(|handle, event| {
-        if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
-            if let Some(state) = handle.try_state::<Backend>() {
-                if let Ok(mut runtime) = state.0.lock() {
-                    if let Some(child) = runtime.child.take() {
-                        terminate_backend(child)
-                    }
+    app.run(|handle, event| match event {
+        RunEvent::WindowEvent {
+            label,
+            event: WindowEvent::CloseRequested { api, .. },
+            ..
+        } if label == "main" => {
+            let keep_running = handle
+                .try_state::<Lifecycle>()
+                .and_then(|state| state.0.lock().ok().map(|value| value.keep_running_in_tray))
+                .unwrap_or(false);
+            if keep_running {
+                api.prevent_close();
+                if let Some(window) = handle.get_webview_window("main") {
+                    let _ = window.hide();
                 }
+            } else {
+                shutdown_owned_backend(handle);
+                handle.exit(0);
             }
         }
+        RunEvent::ExitRequested { .. } | RunEvent::Exit => shutdown_owned_backend(handle),
+        _ => {}
     });
 }

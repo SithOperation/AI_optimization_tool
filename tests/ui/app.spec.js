@@ -92,6 +92,55 @@ test('major pages navigate without fatal errors or viewport overflow', async ({ 
   expect(errors).toEqual([]);
 });
 
+test('sidebar, import controls, and required desktop sizes remain readable', async ({ page, request }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop-1920', 'Run viewport matrix once.');
+  await completeSetup(request);
+  for (const viewport of [
+    { width: 1920, height: 1080 },
+    { width: 1600, height: 900 },
+    { width: 1366, height: 768 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await page.goto('/#import');
+    await expect(page.getByRole('navigation')).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Import Data' })).toHaveClass(/active/);
+    await expect(page.getByRole('heading', { level: 1, name: 'Import telemetry' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Browse Files' })).toBeVisible();
+    await expect(page.locator('#file-input')).toHaveAttribute('accept', '.csv,.json,.jsonl');
+    await expect(page.getByText('CSV · JSON · Up to 500 MB · Processed locally')).toBeVisible();
+    const dimensions = await page.evaluate(() => ({
+      overflow: document.documentElement.scrollWidth - innerWidth,
+      bodySize: parseFloat(getComputedStyle(document.body).fontSize),
+      navSize: parseFloat(getComputedStyle(document.querySelector('nav a')).fontSize),
+    }));
+    expect(dimensions.overflow, `${viewport.width}x${viewport.height} overflows`).toBeLessThanOrEqual(1);
+    expect(dimensions.bodySize).toBeGreaterThanOrEqual(15);
+    expect(dimensions.navSize).toBeGreaterThanOrEqual(15);
+  }
+});
+
+test('desktop tray preference renders and persists through the native command', async ({ page, request }) => {
+  await completeSetup(request);
+  const calls = [];
+  await page.addInitScript(() => {
+    window.__trayEnabled = false;
+    window.__TAURI__ = { core: { invoke: async (command, args) => {
+      if (command === 'startup_status') return { status: 'HEALTHY', failure: null };
+      if (command === 'get_keep_running_in_tray') return window.__trayEnabled;
+      if (command === 'set_keep_running_in_tray') {
+        window.__trayEnabled = args.enabled;
+        window.__trayCalls = [...(window.__trayCalls || []), args.enabled];
+      }
+    } } };
+  });
+  await page.goto('/#settings');
+  const setting = page.getByLabel('Keep running in system tray when closed');
+  await expect(setting).not.toBeChecked();
+  await setting.check();
+  calls.push(...await page.evaluate(() => window.__trayCalls || []));
+  expect(calls).toEqual([true]);
+});
+
 test('application modes switch and persist', async ({ page, request }) => {
   await completeSetup(request);
   await page.goto('/#overview');
