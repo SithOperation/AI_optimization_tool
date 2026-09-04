@@ -31,6 +31,7 @@ dist/
 src-tauri/target/
 src-tauri/gen/schemas/
 src-tauri/binaries/*.exe
+src-tauri/binaries/aiopt-backend/
 !src-tauri/binaries/.gitkeep
 build/
 *.spec

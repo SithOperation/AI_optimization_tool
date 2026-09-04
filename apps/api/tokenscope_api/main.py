@@ -88,8 +88,12 @@ async def security_headers(request: Request, call_next):
     is_ingestion = request.method == "POST" and any(request.url.path.startswith(path) for path in ingestion_paths)
     configured_key=os.getenv("TOKENSCOPE_API_KEY")
     desktop_key=os.getenv("AIOPT_DESKTOP_TOKEN")
-    requires_auth = bool(configured_key or (desktop_key and request.method != "GET" and not is_ingestion))
-    if requires_auth and request.url.path.startswith("/api/v1") and request.url.path != "/api/v1/health":
+    is_health = request.url.path == "/api/v1/health"
+    requires_auth = bool(
+        (configured_key and not is_health)
+        or (desktop_key and (is_health or (request.method != "GET" and not is_ingestion)))
+    )
+    if requires_auth and request.url.path.startswith("/api/v1"):
         supplied_key = request.headers.get("X-TokenScope-Key", "")
         valid_key = any(secrets.compare_digest(supplied_key, candidate) for candidate in (configured_key, desktop_key) if candidate)
         if not valid_key:

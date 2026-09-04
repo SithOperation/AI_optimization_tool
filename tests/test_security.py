@@ -15,6 +15,22 @@ from apps.api.tokenscope_api.importer_streaming import (
 from apps.api.tokenscope_api.main import app
 
 
+def test_openapi_version_and_security_import_routes_are_present():
+    schema = app.openapi()
+    assert schema["info"]["version"] == "0.15.0"
+    expected = {
+        "/api/v1/health",
+        "/api/v1/telemetry",
+        "/api/v1/import/start",
+        "/api/v1/import/{import_id}/upload",
+        "/api/v1/import/{import_id}/analyze",
+        "/api/v1/import/{import_id}/commit",
+        "/api/v1/import/{import_id}/cancel",
+        "/api/v1/import/history",
+    }
+    assert expected <= set(schema["paths"])
+
+
 def test_desktop_entry_binds_ipv4_loopback_only():
     source = Path("apps/api/desktop_entry.py").read_text(encoding="utf-8")
     assert 'host="127.0.0.1"' in source
@@ -38,7 +54,13 @@ def test_desktop_token_protects_telemetry_reset(monkeypatch):
     monkeypatch.setenv("AIOPT_DESKTOP_TOKEN", "launch-secret")
     monkeypatch.setenv("TOKENSCOPE_API_KEY", "external-client-secret")
     with TestClient(app) as client:
-        assert client.get("/api/v1/health").status_code == 200
+        assert client.get("/api/v1/health").status_code == 401
+        assert client.get(
+            "/api/v1/health", headers={"X-TokenScope-Key": "wrong-secret"}
+        ).status_code == 401
+        assert client.get(
+            "/api/v1/health", headers={"X-TokenScope-Key": "launch-secret"}
+        ).status_code == 200
         assert client.get("/api/v1/application").status_code == 401
         assert client.get(
             "/api/v1/application", headers={"X-TokenScope-Key": "launch-secret"}

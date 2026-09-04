@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     io::{Read, Write},
     net::TcpStream,
@@ -71,13 +72,46 @@ impl Backend {
     }
 }
 
+fn should_start_backend(status: &StartupStatus) -> bool {
+    matches!(status, StartupStatus::Failed)
+}
+
 #[derive(Default, Deserialize, Serialize)]
 struct LifecyclePreferences {
     keep_running_in_tray: bool,
 }
 
 struct Lifecycle(Mutex<LifecyclePreferences>);
-struct BackendAuthToken(String);
+struct BackendSession {
+    launch_id: String,
+    token: String,
+    token_fingerprint: String,
+}
+
+fn token_fingerprint(token: &str) -> String {
+    format!("{:x}", Sha256::digest(token.as_bytes()))[..12].to_string()
+}
+
+fn lifecycle_log(app: &AppHandle, message: &str) {
+    let Ok(directory) = app.path().app_log_dir() else {
+        return;
+    };
+    if std::fs::create_dir_all(&directory).is_err() {
+        return;
+    }
+    let path = directory.join("desktop-lifecycle.log");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let _ = writeln!(file, "{timestamp} {message}");
+    }
+}
 
 fn preferences_path(app: &AppHandle) -> Option<PathBuf> {
     app.path()
@@ -124,7 +158,7 @@ fn failure(
     }
 }
 
-fn backend_is_healthy() -> bool {
+fn backend_is_healthy(token: &str) -> bool {
     let Ok(mut stream) =
         TcpStream::connect_timeout(&ADDRESS.parse().unwrap(), Duration::from_millis(500))
     else {
@@ -132,7 +166,7 @@ fn backend_is_healthy() -> bool {
     };
     let _ = stream.set_read_timeout(Some(Duration::from_millis(750)));
     if stream
-        .write_all(b"GET /api/v1/health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .write_all(format!("GET /api/v1/health HTTP/1.1\r\nHost: 127.0.0.1\r\nX-TokenScope-Key: {token}\r\nConnection: close\r\n\r\n").as_bytes())
         .is_err()
     {
         return false;
@@ -166,7 +200,9 @@ fn backend_executable(app: &AppHandle) -> Result<PathBuf, StartupFailure> {
             PathBuf::from("python")
         });
     }
-    let relative = PathBuf::from("binaries").join("aiopt-backend.exe");
+    let relative = PathBuf::from("binaries")
+        .join("aiopt-backend")
+        .join("aiopt-backend.exe");
     app.path()
         .resource_dir()
         .map(|path| path.join(&relative))
@@ -231,6 +267,7 @@ fn shutdown_owned_backend(app: &AppHandle) {
 fn wait_for_backend(
     child: &mut Child,
     executable: &Path,
+    token: &str,
     timeout: Duration,
 ) -> Result<(), StartupFailure> {
     let started = Instant::now();
@@ -256,7 +293,7 @@ fn wait_for_backend(
             }
             Ok(None) => {}
         }
-        if backend_is_healthy() {
+        if backend_is_healthy(token) {
             return Ok(());
         }
         thread::sleep(Duration::from_millis(250));
@@ -277,11 +314,7 @@ fn attempt_backend_start(app: &AppHandle) -> Result<Child, StartupFailure> {
             "PORT_IN_USE",
             "Port 8000 is already in use by another process.",
             &executable,
-            if backend_is_healthy() {
-                "An unowned healthy service responded; the application refused to attach."
-            } else {
-                "Another listener owns the configured port."
-            },
+            "Another listener owns the configured port; the application refused to attach.",
             None,
         ));
     }
@@ -311,9 +344,18 @@ fn attempt_backend_start(app: &AppHandle) -> Result<Child, StartupFailure> {
     } else {
         Command::new(&executable)
     };
+    let session = app.state::<BackendSession>();
+    lifecycle_log(
+        app,
+        &format!(
+            "spawn requested launch={} token={}",
+            session.launch_id, session.token_fingerprint
+        ),
+    );
     let mut child = command
         .env("AIOPT_RUNTIME", "desktop")
-        .env("AIOPT_DESKTOP_TOKEN", &app.state::<BackendAuthToken>().0)
+        .env("AIOPT_DESKTOP_TOKEN", &session.token)
+        .env("AIOPT_DESKTOP_LAUNCH_ID", &session.launch_id)
         .env("NUMBA_THREADING_LAYER", "workqueue")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -333,6 +375,15 @@ fn attempt_backend_start(app: &AppHandle) -> Result<Child, StartupFailure> {
                 error.raw_os_error(),
             )
         })?;
+    lifecycle_log(
+        app,
+        &format!(
+            "backend spawned pid={} launch={} token={}",
+            child.id(),
+            session.launch_id,
+            session.token_fingerprint
+        ),
+    );
     let backend = app.state::<Backend>();
     backend.owned_pid.store(child.id(), Ordering::SeqCst);
     if backend.shutting_down.load(Ordering::SeqCst) {
@@ -346,11 +397,32 @@ fn attempt_backend_start(app: &AppHandle) -> Result<Child, StartupFailure> {
             None,
         ));
     }
-    if let Err(error) = wait_for_backend(&mut child, &executable, Duration::from_secs(30)) {
+    if let Err(error) = wait_for_backend(
+        &mut child,
+        &executable,
+        &session.token,
+        Duration::from_secs(30),
+    ) {
         backend.owned_pid.store(0, Ordering::SeqCst);
         terminate_backend(child);
+        lifecycle_log(
+            app,
+            &format!(
+                "backend startup failed and child terminated launch={} token={} category={}",
+                session.launch_id, session.token_fingerprint, error.category
+            ),
+        );
         return Err(error);
     }
+    lifecycle_log(
+        app,
+        &format!(
+            "authenticated readiness passed pid={} launch={} token={}",
+            child.id(),
+            session.launch_id,
+            session.token_fingerprint
+        ),
+    );
     Ok(child)
 }
 
@@ -365,8 +437,13 @@ mod tests {
             .args(["/C", "exit", "7"])
             .spawn()
             .expect("cmd should launch");
-        let result = wait_for_backend(&mut child, &executable, Duration::from_secs(2))
-            .expect_err("early exit must fail");
+        let result = wait_for_backend(
+            &mut child,
+            &executable,
+            "test-token",
+            Duration::from_secs(2),
+        )
+        .expect_err("early exit must fail");
         assert_eq!(result.category, "CHILD_EXITED");
         assert_eq!(result.child_exit_code, Some(7));
         assert!(!result.summary.contains("environment"));
@@ -382,8 +459,13 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .expect("PowerShell should launch");
-        let result = wait_for_backend(&mut child, &executable, Duration::from_millis(10))
-            .expect_err("unhealthy process must time out");
+        let result = wait_for_backend(
+            &mut child,
+            &executable,
+            "test-token",
+            Duration::from_millis(10),
+        )
+        .expect_err("unhealthy process must time out");
         assert_eq!(result.category, "HEALTH_TIMEOUT");
         terminate_backend(child);
     }
@@ -403,6 +485,22 @@ mod tests {
             serde_json::from_str(&json).expect("preferences should deserialize");
         assert!(restored.keep_running_in_tray);
     }
+
+    #[test]
+    fn only_failed_state_can_create_a_backend() {
+        assert!(should_start_backend(&StartupStatus::Failed));
+        assert!(!should_start_backend(&StartupStatus::Starting));
+        assert!(!should_start_backend(&StartupStatus::Healthy));
+    }
+
+    #[test]
+    fn token_fingerprint_is_stable_and_does_not_expose_token() {
+        let token = "launch-secret-value";
+        let fingerprint = token_fingerprint(token);
+        assert_eq!(fingerprint, token_fingerprint(token));
+        assert_eq!(fingerprint.len(), 12);
+        assert!(!fingerprint.contains(token));
+    }
 }
 
 fn schedule_backend_start(app: AppHandle) {
@@ -412,7 +510,7 @@ fn schedule_backend_start(app: AppHandle) {
         let Ok(mut runtime) = backend.runtime.lock() else {
             return;
         };
-        if matches!(runtime.status, StartupStatus::Starting) && runtime.failure.is_none() {
+        if !should_start_backend(&runtime.status) {
             return;
         }
         runtime.status = StartupStatus::Starting;
@@ -479,15 +577,14 @@ fn startup_status(state: tauri::State<'_, Backend>) -> StartupSnapshot {
 
 #[tauri::command]
 fn retry_backend(app: AppHandle) -> Result<(), String> {
-    let starting = matches!(
-        app.state::<Backend>()
+    let failed = should_start_backend(
+        &app.state::<Backend>()
             .runtime
             .lock()
             .map_err(|_| "Backend state is unavailable")?
             .status,
-        StartupStatus::Starting
     );
-    if !starting {
+    if failed {
         schedule_backend_start(app)
     }
     Ok(())
@@ -540,8 +637,8 @@ fn set_keep_running_in_tray(
 }
 
 #[tauri::command]
-fn backend_auth_token(state: tauri::State<'_, BackendAuthToken>) -> String {
-    state.0.clone()
+fn backend_auth_token(state: tauri::State<'_, BackendSession>) -> String {
+    state.token.clone()
 }
 
 fn restore_main_window(app: &AppHandle) {
@@ -553,12 +650,18 @@ fn restore_main_window(app: &AppHandle) {
 }
 
 fn main() {
+    let token = uuid::Uuid::new_v4().to_string();
+    let session = BackendSession {
+        launch_id: uuid::Uuid::new_v4().to_string(),
+        token_fingerprint: token_fingerprint(&token),
+        token,
+    };
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             restore_main_window(app);
         }))
         .manage(Backend::starting())
-        .manage(BackendAuthToken(uuid::Uuid::new_v4().to_string()))
+        .manage(session)
         .invoke_handler(tauri::generate_handler![
             startup_status,
             retry_backend,

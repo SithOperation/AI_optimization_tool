@@ -17,7 +17,7 @@ $CertificatePath = Join-Path ([System.IO.Path]::GetTempPath()) ("aiopt-signing-"
 try {
     [System.IO.File]::WriteAllBytes($CertificatePath, [Convert]::FromBase64String($CertificateBase64))
     $Targets = if ($Stage -eq 'Backend') {
-        @(Join-Path $RepoRoot 'src-tauri\binaries\aiopt-backend.exe')
+        @(Join-Path $RepoRoot 'src-tauri\binaries\aiopt-backend\aiopt-backend.exe')
     } else {
         @(
             (Join-Path $RepoRoot 'src-tauri\target\release\ai-optimization-tool.exe'),

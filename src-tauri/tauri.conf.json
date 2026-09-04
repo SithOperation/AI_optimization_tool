@@ -1,9 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "AI Optimization Tool",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "identifier": "com.aioptimizationtool.desktop",
   "build": { "beforeDevCommand": "npm run dev -- --host 127.0.0.1 --port 3000", "devUrl": "http://127.0.0.1:3000", "beforeBuildCommand": "npm run build", "frontendDist": "../dist" },
   "app": { "withGlobalTauri": true, "windows": [{ "title": "AI Optimization Tool", "width": 1440, "height": 900, "minWidth": 1100, "minHeight": 700, "center": true, "visible": true }], "security": { "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:8000; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:" } },
-  "bundle": { "active": true, "targets": ["nsis"], "resources": ["binaries/aiopt-backend.exe"], "windows": { "signCommand": { "cmd": "powershell", "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "../scripts/sign-tauri-binary.ps1", "%1"] }, "nsis": { "installMode": "perMachine", "displayLanguageSelector": false } }, "shortDescription": "Local-first AI usage optimization", "longDescription": "Understand, forecast, and optimize AI usage without required paid API keys." }
+  "bundle": { "active": true, "targets": ["nsis"], "resources": ["binaries/aiopt-backend/**/*"], "windows": { "signCommand": { "cmd": "powershell", "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "../scripts/sign-tauri-binary.ps1", "%1"] }, "nsis": { "installMode": "perMachine", "displayLanguageSelector": false } }, "shortDescription": "Local-first AI usage optimization", "longDescription": "Understand, forecast, and optimize AI usage without required paid API keys." }
 }

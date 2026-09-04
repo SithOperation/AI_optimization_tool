@@ -415,7 +415,7 @@ def test_application_directories_and_version(tmp_path):
     paths=ensure_application_directories(tmp_path)
     assert set(paths)==set(DATA_SUBDIRECTORIES)
     assert all(path.is_dir() for path in paths.values())
-    assert VERSION=="0.14.0"
+    assert VERSION=="0.15.0"
 
 def test_first_run_completion_privacy_and_mode_persistence():
     with TestClient(app) as client:

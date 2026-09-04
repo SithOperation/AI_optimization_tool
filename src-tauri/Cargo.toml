@@ -1,6 +1,6 @@
 [package]
 name = "ai-optimization-tool"
-version = "0.14.0"
+version = "0.15.0"
 description = "Local-first AI usage optimization desktop application"
 authors = ["AI Optimization Tool contributors"]
 license = "Apache-2.0"
@@ -13,6 +13,7 @@ tauri-build = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-shell = "2"
 tauri-plugin-single-instance = "2"
