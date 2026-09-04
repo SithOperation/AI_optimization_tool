@@ -4,8 +4,10 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-class EventCreate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+class EventCreate(StrictModel):
     event_id: str = Field(default_factory=lambda: str(uuid4()), max_length=100)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     organization: str = Field(default="default", max_length=120)
@@ -15,10 +17,10 @@ class EventCreate(BaseModel):
     workload: str | None = Field(default=None, max_length=120)
     provider: str = Field(min_length=1, max_length=80)
     model: str = Field(min_length=1, max_length=120)
-    model_family: str | None = None
+    model_family: str | None = Field(default=None, max_length=100)
     deployment_type: Literal["local", "cloud", "hybrid"] = "local"
-    request_id: str | None = None
-    session_id: str | None = None
+    request_id: str | None = Field(default=None, max_length=100)
+    session_id: str | None = Field(default=None, max_length=100)
     input_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(default=0, ge=0)
     cached_input_tokens: int = Field(default=0, ge=0)
@@ -28,8 +30,8 @@ class EventCreate(BaseModel):
     time_to_first_token_ms: float | None = Field(default=None, ge=0)
     tokens_per_second: float | None = Field(default=None, ge=0)
     success: bool = True
-    status_code: int | None = None
-    error_type: str | None = None
+    status_code: int | None = Field(default=None, ge=100, le=599)
+    error_type: str | None = Field(default=None, max_length=120)
     retry_count: int = Field(default=0, ge=0)
     cache_hit: bool = False
     estimated_input_cost: float | None = Field(default=None, ge=0)
@@ -40,7 +42,7 @@ class EventCreate(BaseModel):
     context_utilization: float | None = Field(default=None, ge=0, le=1)
     request_tags: dict[str, str] = Field(default_factory=dict)
     source: str = Field(default="sdk", max_length=50)
-    telemetry_version: str = "1.0"
+    telemetry_version: str = Field(default="1.0", max_length=20)
     identity_mode: Literal["anonymous", "hashed", "explicit"] = "anonymous"
 
     @model_validator(mode="after")
@@ -52,10 +54,10 @@ class EventCreate(BaseModel):
             raise ValueError("cached_input_tokens cannot exceed input_tokens")
         return self
 
-class BatchCreate(BaseModel):
+class BatchCreate(StrictModel):
     events: list[EventCreate] = Field(min_length=1, max_length=1000)
 
-class PriceOverrideCreate(BaseModel):
+class PriceOverrideCreate(StrictModel):
     model_id: str = Field(min_length=1, max_length=120)
     provider: str = Field(default="custom", max_length=80)
     input_price_per_million: float = Field(ge=0)
@@ -66,12 +68,12 @@ class PriceOverrideCreate(BaseModel):
     source: str = Field(default="User override", max_length=200)
     last_verified: str = Field(pattern="^\\d{4}-\\d{2}-\\d{2}$")
 
-class ImportRequest(BaseModel):
+class ImportRequest(StrictModel):
     format: Literal["csv", "json"]
     content: str = Field(min_length=2, max_length=4_500_000)
     mapping: dict[str, str] = Field(default_factory=dict)
 
-class BudgetCreate(BaseModel):
+class BudgetCreate(StrictModel):
     name: str = Field(min_length=1, max_length=120)
     scope_type: Literal["organization", "department", "team", "application", "provider", "model"] = "organization"
     scope_value: str | None = Field(default=None, max_length=120)
@@ -86,14 +88,14 @@ class BudgetCreate(BaseModel):
             raise ValueError("scope_value is required outside organization scope")
         return self
 
-class ModelMixItem(BaseModel):
-    model: str
+class ModelMixItem(StrictModel):
+    model: str = Field(min_length=1, max_length=120)
     share_percent: float = Field(ge=0, le=100)
     input_price_per_million: float = Field(ge=0)
     output_price_per_million: float = Field(ge=0)
 
-class ScenarioRequest(BaseModel):
-    name: str = "Expected"
+class ScenarioRequest(StrictModel):
+    name: str = Field(default="Expected", min_length=1, max_length=120)
     employees: int = Field(ge=1, le=1_000_000)
     active_ai_users: int | None = Field(default=None, ge=0)
     adoption_percent: float = Field(default=50, ge=0, le=100)
@@ -107,19 +109,19 @@ class ScenarioRequest(BaseModel):
     application_growth_percent: float = Field(default=0, ge=-100, le=1000)
     model_mix: list[ModelMixItem] = Field(min_length=1, max_length=20)
 
-class MigrationRequest(BaseModel):
+class MigrationRequest(StrictModel):
     application: str = Field(min_length=1, max_length=120)
     alternative_model: str = Field(min_length=1, max_length=120)
     alternative_input_price_per_million: float | None = Field(default=None, ge=0)
     alternative_output_price_per_million: float | None = Field(default=None, ge=0)
     days: int = Field(default=30, ge=1, le=365)
 
-class LocalCloudRequest(BaseModel):
+class LocalCloudRequest(StrictModel):
     monthly_input_tokens: float = Field(ge=0)
     monthly_output_tokens: float = Field(ge=0)
     cloud_input_price_per_million: float = Field(ge=0)
     cloud_output_price_per_million: float = Field(ge=0)
-    gpu_name: str = "Local GPU"
+    gpu_name: str = Field(default="Local GPU", min_length=1, max_length=120)
     gpu_quantity: int = Field(default=1, ge=1, le=10000)
     gpu_purchase_price: float = Field(ge=0)
     power_draw_watts: float = Field(ge=0)
@@ -130,31 +132,31 @@ class LocalCloudRequest(BaseModel):
     monthly_maintenance_cost: float = Field(default=0, ge=0)
     monthly_hosting_cost: float = Field(default=0, ge=0)
 
-class IntegrationRequest(BaseModel):
+class IntegrationRequest(StrictModel):
     kind: Literal["ollama", "vllm", "generic-openai-compatible", "litellm"]
     name: str = Field(min_length=1, max_length=120)
     base_url: str = Field(min_length=8, max_length=500)
     collect_user_identifiers: bool = False
 
-class AdapterEvent(BaseModel):
-    payload: dict
+class AdapterEvent(StrictModel):
+    payload: dict = Field(max_length=500)
     application: str = Field(default="OpenAI-compatible application", max_length=120)
-    department: str | None = None
-    team: str | None = None
-    workload: str | None = None
-    provider: str | None = None
+    department: str | None = Field(default=None, max_length=100)
+    team: str | None = Field(default=None, max_length=100)
+    workload: str | None = Field(default=None, max_length=120)
+    provider: str | None = Field(default=None, max_length=80)
     source: Literal["ollama", "vllm", "generic-openai-compatible"] = "generic-openai-compatible"
 
-class CloudProviderRequest(BaseModel):
+class CloudProviderRequest(StrictModel):
     provider: Literal["openai", "anthropic", "gemini", "azure-openai", "bedrock"]
     enabled: bool = False
     credential_env_var: str = Field(pattern="^[A-Z][A-Z0-9_]{2,99}$")
     endpoint: str | None = Field(default=None, max_length=500)
 
-class RetentionRequest(BaseModel):
+class RetentionRequest(StrictModel):
     days: int | None = Field(default=90, ge=30, le=3650)
 
-class PrivacyRequest(BaseModel):
+class PrivacyRequest(StrictModel):
     collect_token_counts: bool = True
     collect_latency: bool = True
     collect_model: bool = True
@@ -171,7 +173,7 @@ class PrivacyRequest(BaseModel):
     def content_warning(self):
         return self
 
-class ModelEvaluationCreate(BaseModel):
+class ModelEvaluationCreate(StrictModel):
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     model: str = Field(min_length=1, max_length=120)
     application: str | None = Field(default=None, max_length=120)
@@ -190,20 +192,20 @@ class ModelEvaluationCreate(BaseModel):
         return self
 
 
-class FileUploadStart(BaseModel):
+class FileUploadStart(StrictModel):
     """Initiate a large file import."""
     filename: str = Field(min_length=1, max_length=255)
     file_size: int = Field(gt=0, le=500_000_000)  # 500 MB limit
     format: Literal["csv", "json"]
 
 
-class ColumnMapping(BaseModel):
+class ColumnMapping(StrictModel):
     """Maps CSV/JSON columns to EventCreate fields."""
     mapping: dict[str, str]  # {csv_column: event_field}
     duplicate_handling: Literal["skip", "replace", "fail"] = "skip"
 
 
-class ImportPreview(BaseModel):
+class ImportPreview(StrictModel):
     """Analysis of file before import commit."""
     import_id: str
     filename: str
@@ -216,7 +218,7 @@ class ImportPreview(BaseModel):
     validation_summary: dict  # {valid_rows, rejected_rows, warnings}
 
 
-class ImportJobStatus(BaseModel):
+class ImportJobStatus(StrictModel):
     """Status of an in-progress or completed import."""
     import_id: str
     filename: str
@@ -239,7 +241,7 @@ class ImportJobStatus(BaseModel):
     rate_rows_per_sec: float = 0
 
 
-class ImportHistoryItem(BaseModel):
+class ImportHistoryItem(StrictModel):
     """Summary of past import for history view."""
     import_id: str
     filename: str
@@ -255,14 +257,14 @@ class ImportHistoryItem(BaseModel):
     error_count: int
 
 
-class RejectedRowExport(BaseModel):
+class RejectedRowExport(StrictModel):
     """Details for exporting rejected rows."""
     import_id: str
     include_values: bool = False  # Include original values or just error info
 
 
-class ImportCommit(BaseModel):
+class ImportCommit(StrictModel):
     """Start the actual import after preview and mapping."""
     import_id: str
-    mapping: dict[str, str]  # Final confirmed mapping
+    mapping: dict[str, str] = Field(max_length=100)  # Final confirmed mapping
     duplicate_handling: Literal["skip", "replace", "fail"] = "skip"

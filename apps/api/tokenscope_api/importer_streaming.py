@@ -16,7 +16,8 @@ import csv
 import io
 import json
 import os
-import tempfile
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterator
@@ -27,8 +28,17 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .database import SessionLocal
+from .app_config import ensure_application_directories
 from .models import ImportJob, TelemetryEvent
 from .schemas import EventCreate
+
+MAX_FILE_SIZE = 500_000_000
+MAX_UPLOAD_CHUNK_SIZE = 5_000_000
+MAX_RECORD_CHARS = 2_000_000
+STALE_IMPORT_SECONDS = 24 * 60 * 60
+_upload_locks: dict[str, threading.Lock] = {}
+_upload_locks_guard = threading.Lock()
+csv.field_size_limit(MAX_RECORD_CHARS)
 
 
 # Known aliases for common column names
@@ -79,7 +89,7 @@ class ParseError(ImportError):
 
 def validate_file_metadata(filename: str, file_size: int, file_format: str) -> None:
     """Validate filename, size, and format before processing."""
-    max_size = 500_000_000  # 500 MB
+    max_size = MAX_FILE_SIZE
 
     # Validate size
     if file_size <= 0:
@@ -191,6 +201,124 @@ def parse_json_rows(content: str) -> Iterator[dict]:
             raise ParseError("JSON must be an array or line-delimited objects")
     except json.JSONDecodeError as e:
         raise ParseError(f"Invalid JSON: {e}")
+
+
+class LimitedTextLines:
+    """Iterator that rejects pathological CSV/JSONL records without buffering them fully."""
+
+    def __init__(self, handle):
+        self.handle = handle
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        line = self.handle.readline(MAX_RECORD_CHARS + 1)
+        if not line:
+            raise StopIteration
+        if len(line) > MAX_RECORD_CHARS or (len(line) == MAX_RECORD_CHARS + 1 and not line.endswith("\n")):
+            raise ParseError("A source record exceeds the 2 MB safety limit")
+        if "\x00" in line:
+            raise ParseError("NULL bytes are not allowed in import files")
+        return line
+
+
+def stream_json_array(handle) -> Iterator[dict]:
+    decoder = json.JSONDecoder()
+    buffer = ""
+    started = False
+    eof = False
+    while True:
+        if not eof and len(buffer) < 64_000:
+            block = handle.read(64_000)
+            eof = not block
+            buffer += block
+        buffer = buffer.lstrip()
+        if not started:
+            if not buffer and eof:
+                raise ParseError("JSON file is empty")
+            if not buffer:
+                continue
+            if buffer[0] != "[":
+                raise ParseError("JSON must be an array or line-delimited objects")
+            buffer = buffer[1:]
+            started = True
+        buffer = buffer.lstrip()
+        if buffer.startswith(","):
+            buffer = buffer[1:].lstrip()
+        if buffer.startswith("]"):
+            if buffer[1:].strip() or not eof:
+                remainder = buffer[1:] + (handle.read() if not eof else "")
+                if remainder.strip():
+                    raise ParseError("Unexpected data after JSON array")
+            return
+        try:
+            item, end = decoder.raw_decode(buffer)
+        except json.JSONDecodeError as error:
+            if eof:
+                raise ParseError("Invalid or incomplete JSON array") from error
+            if len(buffer) > MAX_RECORD_CHARS:
+                raise ParseError("A JSON object exceeds the 2 MB safety limit") from error
+            block = handle.read(64_000)
+            eof = not block
+            buffer += block
+            continue
+        if not isinstance(item, dict):
+            raise ParseError("JSON array contains non-object items")
+        yield item
+        buffer = buffer[end:]
+
+
+def iter_file_rows(path: Path, file_format: str, encoding: str, delimiter: str = ",") -> Iterator[dict]:
+    with path.open("r", encoding=encoding, errors="strict", newline="") as handle:
+        if file_format == "csv":
+            reader = csv.DictReader(LimitedTextLines(handle), delimiter=delimiter)
+            if not reader.fieldnames:
+                raise ParseError("CSV has no headers")
+            for row in reader:
+                if None in row:
+                    raise ParseError("CSV row contains more fields than the header")
+                if any(value and value.strip() for value in row.values()):
+                    yield dict(row)
+            return
+        first = handle.read(1)
+        while first and first.isspace():
+            first = handle.read(1)
+        handle.seek(0)
+        if first == "[":
+            yield from stream_json_array(handle)
+        else:
+            for line in LimitedTextLines(handle):
+                if not line.strip():
+                    continue
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError as error:
+                    raise ParseError("Invalid JSON line") from error
+                if not isinstance(item, dict):
+                    raise ParseError("Each JSON line must be an object")
+                yield item
+
+
+def import_directory() -> Path:
+    path = ensure_application_directories()["cache"] / "tokenscope_imports"
+    path.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink():
+        raise FileValidationError("Import storage cannot be a symbolic link")
+    return path
+
+
+def cleanup_stale_import_files(max_age_seconds: int = STALE_IMPORT_SECONDS) -> int:
+    cutoff = time.time() - max_age_seconds
+    removed = 0
+    for path in import_directory().glob("*.tmp"):
+        try:
+            if path.is_file() and not path.is_symlink() and path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed
 
 
 def auto_map_columns(csv_headers: list[str]) -> dict[str, str]:
@@ -340,7 +468,7 @@ class StreamingImporter:
 
     def __init__(self, import_id: str, temp_dir: str | None = None):
         self.import_id = import_id
-        self.temp_dir = temp_dir or tempfile.gettempdir()
+        self.temp_dir = Path(temp_dir) if temp_dir else ensure_application_directories()["cache"]
         self.temp_file_path = None
         self.job: ImportJob | None = None
 
@@ -348,15 +476,48 @@ class StreamingImporter:
         """Get the path for this import's temp file."""
         if not self.temp_file_path:
             import_dir = Path(self.temp_dir) / "tokenscope_imports"
-            import_dir.mkdir(exist_ok=True)
+            import_dir.mkdir(parents=True, exist_ok=True)
+            if import_dir.is_symlink():
+                raise FileValidationError("Import storage cannot be a symbolic link")
             self.temp_file_path = import_dir / f"{self.import_id}.tmp"
         return self.temp_file_path
 
     async def receive_file_chunk(self, chunk: bytes) -> None:
         """Append chunk to temp file."""
+        if len(chunk) > MAX_UPLOAD_CHUNK_SIZE:
+            raise FileValidationError("Upload chunk exceeds the 5 MB limit")
         path = self.get_temp_path()
-        with open(path, "ab") as f:
+        with path.open("ab") as f:
             f.write(chunk)
+
+    async def receive_upload(self, upload, declared_file_size: int) -> int:
+        """Stream one multipart chunk to disk while enforcing cumulative limits."""
+        with _upload_locks_guard:
+            lock = _upload_locks.setdefault(self.import_id, threading.Lock())
+        received = 0
+        parts = []
+        while True:
+            part = await upload.read(1_000_000)
+            if not part:
+                break
+            received += len(part)
+            if received > MAX_UPLOAD_CHUNK_SIZE:
+                raise FileValidationError("Upload chunk exceeds the 5 MB limit")
+            parts.append(part)
+        path = self.get_temp_path()
+        with lock:
+            existing = path.stat().st_size if path.exists() else 0
+            if existing + received > declared_file_size or existing + received > MAX_FILE_SIZE:
+                raise FileValidationError("Uploaded data exceeds the declared file size")
+            with path.open("ab") as handle:
+                for part in parts:
+                    handle.write(part)
+        return received
+
+    def verify_complete(self, declared_file_size: int) -> None:
+        path = self.get_temp_path()
+        if not path.is_file() or path.is_symlink() or path.stat().st_size != declared_file_size:
+            raise FileValidationError("Upload is incomplete or does not match the declared file size")
 
     async def analyze_file(
         self, filename: str, file_format: str, progress: Callable | None = None
@@ -369,14 +530,11 @@ class StreamingImporter:
         if not path.exists():
             raise FileValidationError("File not found in temp storage")
 
-        file_size = path.stat().st_size
-
-        # Read raw file
+        # Inspect only a bounded prefix for encoding and delimiter detection.
         with open(path, "rb") as f:
-            raw_data = f.read()
+            raw_data = f.read(64_000)
 
         encoding = guess_encoding(raw_data)
-        content = raw_data.decode(encoding, errors="replace")
 
         sample_rows = []
         total_rows = 0
@@ -387,10 +545,8 @@ class StreamingImporter:
 
         try:
             if file_format == "csv":
-                detected_delimiter = guess_csv_delimiter(content[:10000])
-                rows_iter = parse_csv_rows(content, detected_delimiter)
-            else:  # json
-                rows_iter = parse_json_rows(content)
+                detected_delimiter = guess_csv_delimiter(raw_data.decode(encoding, errors="strict")[:10000])
+            rows_iter = iter_file_rows(path, file_format, encoding, detected_delimiter or ",")
 
             # Scan entire file for row count and collect samples
             for row_num, row in enumerate(rows_iter, 1):
@@ -456,11 +612,7 @@ class StreamingImporter:
             if not self.job:
                 raise FileValidationError("Import not found")
 
-            with open(path, "rb") as f:
-                raw_data = f.read()
-
             encoding = self.job.detected_encoding or "UTF-8"
-            content = raw_data.decode(encoding, errors="replace")
             file_format = self.job.format
 
             pending_rows = []
@@ -473,9 +625,9 @@ class StreamingImporter:
 
             if file_format == "csv":
                 delimiter = self.job.detected_delimiter or ","
-                rows_iter = parse_csv_rows(content, delimiter)
             else:
-                rows_iter = parse_json_rows(content)
+                delimiter = ","
+            rows_iter = iter_file_rows(path, file_format, encoding, delimiter)
 
             for row_num, row in enumerate(rows_iter, 1):
                 processed = row_num

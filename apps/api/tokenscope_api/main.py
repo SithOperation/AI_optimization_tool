@@ -7,10 +7,12 @@ import io
 import json
 import logging
 import os
+import secrets
 from urllib.parse import urlparse
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, UploadFile, File
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import Integer, case, delete, func, select
@@ -20,7 +22,7 @@ from .database import Base, DEFAULT_DB, SessionLocal, engine
 from .app_config import APP_NAME, VERSION, application_data_dir, build_information, configure_logging, ensure_application_directories
 from .demo import generate_demo
 from .importer import parse_import
-from .importer_streaming import StreamingImporter, export_rejected_rows_csv
+from .importer_streaming import StreamingImporter, cleanup_stale_import_files, export_rejected_rows_csv
 from .models import AppSetting, AuditEvent, Budget, CloudProviderConfig, ForecastRun, ImportJob, Integration, ModelEvaluation, PriceOverride, TelemetryEvent
 from .pricing import calculate, get_price, registry
 from .schemas import AdapterEvent, BatchCreate, BudgetCreate, CloudProviderRequest, EventCreate, FileUploadStart, ImportCommit, ImportHistoryItem, ImportJobStatus, ImportRequest, ImportPreview, IntegrationRequest, LocalCloudRequest, MigrationRequest, ModelEvaluationCreate, PriceOverrideCreate, PrivacyRequest, RetentionRequest, ScenarioRequest
@@ -40,6 +42,7 @@ async def lifespan(_: FastAPI):
     configure_logging()
     paths = ensure_application_directories()
     Base.metadata.create_all(engine)
+    cleanup_stale_import_files()
     with SessionLocal() as startup_db:
         telemetry_count = startup_db.scalar(select(func.count()).select_from(TelemetryEvent)) or 0
     application_logger = logging.getLogger("aiopt.application")
@@ -49,8 +52,19 @@ async def lifespan(_: FastAPI):
     yield
     engine.dispose()
 
-app = FastAPI(title=f"{APP_NAME} API", version=VERSION, lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:5173", "http://127.0.0.1:5173", "tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"], allow_methods=["GET", "POST", "PUT", "DELETE"], allow_headers=["Content-Type", "X-TokenScope-Key"])
+desktop_runtime = os.getenv("AIOPT_RUNTIME") == "desktop"
+app = FastAPI(title=f"{APP_NAME} API", version=VERSION, lifespan=lifespan,
+              docs_url=None if desktop_runtime else "/docs",
+              redoc_url=None if desktop_runtime else "/redoc",
+              openapi_url=None if desktop_runtime else "/openapi.json")
+desktop_origins = ["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"]
+development_origins = ["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:5173", "http://127.0.0.1:5173"]
+app.add_middleware(CORSMiddleware, allow_origins=desktop_origins if desktop_runtime else desktop_origins + development_origins, allow_methods=["GET", "POST", "PUT", "DELETE"], allow_headers=["Content-Type", "X-TokenScope-Key"])
+
+@app.exception_handler(RequestValidationError)
+async def controlled_validation_error(_: Request, error: RequestValidationError):
+    details = [{key: value for key, value in item.items() if key not in {"input", "ctx"}} for item in error.errors()]
+    return JSONResponse({"detail": details}, status_code=422)
 rate_limiter=SlidingWindowLimiter(limit=int(os.getenv("TOKENSCOPE_INGEST_RATE_LIMIT","600")))
 logger=logging.getLogger("aiopt.api")
 if not logger.handlers:
@@ -60,14 +74,27 @@ if not logger.handlers:
 async def security_headers(request: Request, call_next):
     # Allow large files for import endpoints (up to 500 MB), but enforce 5 MB limit for normal API
     is_import_upload = request.url.path.startswith("/api/v1/import/") and "/upload" in request.url.path
-    max_size = 500_000_000 if is_import_upload else 5_000_000
-    if request.headers.get("content-length") and int(request.headers["content-length"]) > max_size:
+    max_size = 6_000_000 if is_import_upload else 5_000_000
+    content_length = request.headers.get("content-length")
+    try:
+        declared_size = int(content_length) if content_length is not None else None
+    except ValueError:
+        return JSONResponse({"detail":"Invalid Content-Length header"},status_code=400)
+    if declared_size is not None and (declared_size < 0 or declared_size > max_size):
         return JSONResponse({"detail":f"Request body exceeds {max_size / 1_000_000:.0f} MB"},status_code=413)
-    configured_key=os.getenv("TOKENSCOPE_API_KEY")
-    if configured_key and request.url.path.startswith("/api/v1") and request.url.path!="/api/v1/health" and request.headers.get("X-TokenScope-Key")!=configured_key:
-        return JSONResponse({"detail":"Authentication required"},status_code=401)
+    if request.method in {"POST", "PUT", "PATCH"} and declared_size is None:
+        return JSONResponse({"detail":"Content-Length is required"},status_code=411)
     ingestion_paths=("/api/v1/events","/api/v1/otlp/","/api/v1/integrations/litellm/events","/api/v1/integrations/compatible/events")
-    if request.method=="POST" and any(request.url.path.startswith(path) for path in ingestion_paths):
+    is_ingestion = request.method == "POST" and any(request.url.path.startswith(path) for path in ingestion_paths)
+    configured_key=os.getenv("TOKENSCOPE_API_KEY")
+    desktop_key=os.getenv("AIOPT_DESKTOP_TOKEN")
+    requires_auth = bool(configured_key or (desktop_key and request.method != "GET" and not is_ingestion))
+    if requires_auth and request.url.path.startswith("/api/v1") and request.url.path != "/api/v1/health":
+        supplied_key = request.headers.get("X-TokenScope-Key", "")
+        valid_key = any(secrets.compare_digest(supplied_key, candidate) for candidate in (configured_key, desktop_key) if candidate)
+        if not valid_key:
+            return JSONResponse({"detail":"Authentication required"},status_code=401)
+    if is_ingestion:
         client=request.client.host if request.client else "unknown"
         if not rate_limiter.allow(client): return JSONResponse({"detail":"Ingestion rate limit exceeded"},status_code=429,headers={"Retry-After":"60"})
     started=datetime.now(timezone.utc)
@@ -611,6 +638,10 @@ def start_import(payload: FileUploadStart, db: Session = Depends(db_session)):
     except Exception as e:
         raise HTTPException(400, str(e))
     
+    active = db.scalar(select(func.count()).select_from(ImportJob).where(ImportJob.status.in_(("UPLOADED", "ANALYZING", "READY", "IMPORTING")))) or 0
+    if active >= 10:
+        raise HTTPException(429, "Too many active imports; cancel or complete an existing import")
+
     # Create import job record
     import_id = str(uuid4())
     job = ImportJob(
@@ -640,12 +671,11 @@ async def upload_chunk(import_id: str, file: UploadFile = File(...), db: Session
     # Read and store chunk
     importer = StreamingImporter(import_id)
     try:
-        chunk = await file.read()
-        await importer.receive_file_chunk(chunk)
+        uploaded = await importer.receive_upload(file, job.file_size)
     except Exception as e:
-        raise HTTPException(400, f"File upload error: {str(e)}")
+        raise HTTPException(400, "File upload was rejected") from e
     
-    return {"uploaded": len(chunk), "import_id": import_id}
+    return {"uploaded": uploaded, "import_id": import_id}
 
 
 @app.post("/api/v1/import/{import_id}/analyze")
@@ -663,6 +693,7 @@ async def analyze_import(import_id: str, db: Session = Depends(db_session)):
     
     try:
         importer = StreamingImporter(import_id)
+        importer.verify_complete(job.file_size)
         analysis = await importer.analyze_file(job.filename, job.format)
         
         # Update job with analysis results
@@ -694,9 +725,10 @@ async def analyze_import(import_id: str, db: Session = Depends(db_session)):
         }
     except Exception as e:
         job.status = "FAILED"
-        job.failure_reason = str(e)
+        job.failure_reason = str(e)[:500]
         db.commit()
-        raise HTTPException(400, f"Analysis failed: {str(e)}")
+        StreamingImporter(import_id).cleanup()
+        raise HTTPException(400, "Analysis failed; verify the file format and content") from e
 
 
 @app.get("/api/v1/import/{import_id}/status")
@@ -747,6 +779,13 @@ async def commit_import(import_id: str, payload: ImportCommit, db: Session = Dep
         raise HTTPException(404, "Import not found")
     if job.status != "READY":
         raise HTTPException(400, f"Cannot start import in {job.status} status")
+    if not payload.mapping:
+        job.status = "FAILED"
+        job.failure_reason = "Column mapping is required before committing an import"
+        job.completed_at = datetime.now(timezone.utc)
+        db.commit()
+        StreamingImporter(import_id).cleanup()
+        raise HTTPException(400, "Column mapping is required before committing an import")
     
     # Update status
     job.status = "IMPORTING"
@@ -776,10 +815,11 @@ async def commit_import(import_id: str, payload: ImportCommit, db: Session = Dep
         job = db.get(ImportJob, import_id)
         if job:
             job.status = "FAILED"
-            job.failure_reason = str(e)
+            job.failure_reason = str(e)[:500]
             job.completed_at = datetime.now(timezone.utc)
             db.commit()
-        raise HTTPException(400, f"Import failed: {str(e)}")
+        StreamingImporter(import_id).cleanup()
+        raise HTTPException(400, "Import failed; verify column mapping and source data") from e
 
 
 @app.delete("/api/v1/import/{import_id}/cancel")
@@ -795,6 +835,7 @@ def cancel_import(import_id: str, db: Session = Depends(db_session)):
     importer.cancel()
     
     audit(db, "import.cancelled", "import", import_id)
+    db.commit()
     return {"import_id": import_id, "status": "CANCELLED"}
 
 
@@ -862,7 +903,6 @@ def delete_import_batch(import_id: str, db: Session = Depends(db_session)):
             TelemetryEvent.timestamp <= (job.completed_at or datetime.now(timezone.utc))
         )
     )
-    db.commit()
-    
     audit(db, "import.batch_deleted", "import", import_id, rows_deleted=deleted.rowcount)
+    db.commit()
     return {"import_id": import_id, "deleted_rows": deleted.rowcount}

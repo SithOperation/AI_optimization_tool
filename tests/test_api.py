@@ -186,7 +186,7 @@ def test_large_file_persistence_failure_rolls_back_and_marks_failed(monkeypatch)
         client.delete("/api/v1/telemetry")
         import_id, response = commit_large_import(client, content)
         assert response.status_code == 400
-        assert "simulated persistence failure" in response.json()["detail"]
+        assert response.json()["detail"] == "Import failed; verify column mapping and source data"
         assert client.get("/api/v1/health").json()["events"] == 0
         status = client.get(f"/api/v1/import/{import_id}/status").json()
         assert status["status"] == "FAILED"

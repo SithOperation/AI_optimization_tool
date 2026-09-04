@@ -1,6 +1,8 @@
 import os
 import sys
 
+os.environ.setdefault("AIOPT_RUNTIME", "desktop")
+
 # PyInstaller's Windows GUI bootloader intentionally provides no console
 # streams. Uvicorn inspects these streams while configuring logging, so give
 # it safe sinks without creating a visible terminal window.
@@ -13,7 +15,6 @@ import uvicorn
 from tokenscope_api.main import app
 
 if __name__ == "__main__":
-    os.environ.setdefault("AIOPT_RUNTIME", "desktop")
     # StatsForecast/Numba can run on its bundled workqueue. TBB is optional and
     # is intentionally not shipped until its runtime DLL can be signed/bundled.
     os.environ.setdefault("NUMBA_THREADING_LAYER", "workqueue")

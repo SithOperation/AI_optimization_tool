@@ -27,6 +27,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-shell",
  "tauri-plugin-single-instance",
+ "uuid",
 ]
 
 [[package]]

@@ -77,6 +77,7 @@ struct LifecyclePreferences {
 }
 
 struct Lifecycle(Mutex<LifecyclePreferences>);
+struct BackendAuthToken(String);
 
 fn preferences_path(app: &AppHandle) -> Option<PathBuf> {
     app.path()
@@ -312,6 +313,7 @@ fn attempt_backend_start(app: &AppHandle) -> Result<Child, StartupFailure> {
     };
     let mut child = command
         .env("AIOPT_RUNTIME", "desktop")
+        .env("AIOPT_DESKTOP_TOKEN", &app.state::<BackendAuthToken>().0)
         .env("NUMBA_THREADING_LAYER", "workqueue")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -537,6 +539,11 @@ fn set_keep_running_in_tray(
     save_preferences(&app, &preferences)
 }
 
+#[tauri::command]
+fn backend_auth_token(state: tauri::State<'_, BackendAuthToken>) -> String {
+    state.0.clone()
+}
+
 fn restore_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
@@ -551,13 +558,15 @@ fn main() {
             restore_main_window(app);
         }))
         .manage(Backend::starting())
+        .manage(BackendAuthToken(uuid::Uuid::new_v4().to_string()))
         .invoke_handler(tauri::generate_handler![
             startup_status,
             retry_backend,
             open_logs,
             exit_application,
             get_keep_running_in_tray,
-            set_keep_running_in_tray
+            set_keep_running_in_tray,
+            backend_auth_token
         ])
         .setup(|app| {
             app.manage(Lifecycle(Mutex::new(load_preferences(app.handle()))));

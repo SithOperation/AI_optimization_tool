@@ -27,14 +27,20 @@ try {
     if ($Listeners | Where-Object LocalAddress -NotIn @('127.0.0.1','::1')) {
         throw 'Packaged backend opened a non-loopback listener.'
     }
+    $Application = Invoke-RestMethod 'http://127.0.0.1:8000/api/v1/application'
+    if ($Application.version -ne '0.14.0') { throw "Unexpected packaged backend version: $($Application.version)" }
+    $ImportHistory = Invoke-RestMethod 'http://127.0.0.1:8000/api/v1/import/history'
+    if ($null -eq $ImportHistory) { throw 'Packaged import-history route failed.' }
     Invoke-RestMethod 'http://127.0.0.1:8000/api/v1/demo?days=30' -Method Post | Out-Null
     $Forecast = Invoke-RestMethod 'http://127.0.0.1:8000/api/v1/forecasts?metric=total_tokens&horizon=7'
     if (-not $Forecast.forecast -or $Forecast.forecast.Count -ne 7) { throw 'Packaged forecast smoke test failed.' }
     $ScenarioBody = @{ name='RC smoke'; employees=100; adoption_percent=50; requests_per_user_day=5; average_input_tokens=500; average_output_tokens=150; working_days_month=22; monthly_growth_percent=5; cache_hit_percent=10; retry_percent=2; application_growth_percent=5; model_mix=@(@{model='Economy';share_percent=100;input_price_per_million=.5;output_price_per_million=1.5}) } | ConvertTo-Json -Depth 5
     $Scenario = Invoke-RestMethod 'http://127.0.0.1:8000/api/v1/simulator/scenario' -Method Post -ContentType 'application/json' -Body $ScenarioBody
     if ($Scenario.monthly_spend -le 0) { throw 'Packaged Scenario Lab smoke test failed.' }
+    $Reset = Invoke-RestMethod 'http://127.0.0.1:8000/api/v1/telemetry' -Method Delete
+    if (-not $Reset.success) { throw 'Packaged telemetry reset route failed.' }
     if (-not (Test-Path -LiteralPath (Join-Path $SmokeRoot 'database'))) { throw 'Packaged database directory was not initialized.' }
-    Write-Host "Packaged backend healthy on loopback; forecast points=$($Forecast.forecast.Count); scenario spend=$($Scenario.monthly_spend)"
+    Write-Host "Packaged backend $($Application.version) healthy on loopback; import history and reset routes passed; forecast points=$($Forecast.forecast.Count); scenario spend=$($Scenario.monthly_spend)"
 }
 finally {
     if ($Process -and -not $Process.HasExited) {
