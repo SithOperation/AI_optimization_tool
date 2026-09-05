@@ -61,7 +61,7 @@ jobs:
       - name: Microsoft Defender installer scan
         shell: powershell
         run: |
-          $installer = Get-ChildItem src-tauri\target\release\bundle\nsis -Filter '*0.16.0*-setup.exe' | Select-Object -First 1
+          $installer = Get-ChildItem src-tauri\target\release\bundle\nsis -Filter '*0.13.0*-setup.exe' | Select-Object -First 1
           if (-not $installer) { throw 'Installer was not generated.' }
           $scanner = Join-Path $env:ProgramFiles 'Windows Defender\MpCmdRun.exe'
           if (Test-Path $scanner) { & $scanner -Scan -ScanType 3 -File $installer.FullName; if ($LASTEXITCODE -gt 1) { throw "Defender scan failed: $LASTEXITCODE" } }
@@ -73,7 +73,7 @@ jobs:
           Copy-Item src-tauri\target\release\bundle\nsis\*.exe artifacts\installer\
       - uses: actions/upload-artifact@v4
         with:
-          name: AI-Optimization-Tool-0.16.0-windows-rc
+          name: AI-Optimization-Tool-0.13.0-windows-rc
           path: |
             artifacts/installer/*.exe
             artifacts/*SHA256.txt

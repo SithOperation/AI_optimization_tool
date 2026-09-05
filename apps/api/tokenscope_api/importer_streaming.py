@@ -1,4 +1,3 @@
-from .export_safety import csv_safe
 """
 Large-file streaming telemetry import handler.
 
@@ -810,15 +809,15 @@ def export_rejected_rows_csv(import_id: str, include_values: bool = False) -> st
                 writer.writerow(
                     {
                         "row_number": reject.get("row_number"),
-                        "error": csv_safe(reject.get("error")),
-                        "fields": csv_safe("|".join(reject.get("fields", []))),
+                        "error": reject.get("error"),
+                        "fields": "|".join(reject.get("fields", [])),
                     }
                 )
             else:
                 writer.writerow(
                     {
                         "row_number": reject.get("row_number"),
-                        "error": csv_safe(reject.get("error")),
+                        "error": reject.get("error"),
                     }
                 )
 

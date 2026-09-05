@@ -15,7 +15,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, UploadFile,
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import Integer, case, delete, func, select, literal
+from sqlalchemy import Integer, case, delete, func, select
 from sqlalchemy.orm import Session
 
 from .database import Base, DEFAULT_DB, SessionLocal, engine
@@ -36,11 +36,6 @@ from integrations.opentelemetry.adapter import normalize_otlp
 from integrations.security import validate_local_url
 from services.security.rate_limit import SlidingWindowLimiter
 from services.analytics.efficiency import efficiency_score
-from .export_safety import csv_safe
-from .authorization import authorize, actor_context
-from .administration import register_administration
-from .secrets_service import credential_status
-from .sql_functions import day_bucket, hour_bucket
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -50,8 +45,6 @@ async def lifespan(_: FastAPI):
     cleanup_stale_import_files()
     with SessionLocal() as startup_db:
         telemetry_count = startup_db.scalar(select(func.count()).select_from(TelemetryEvent)) or 0
-        audit(startup_db, "application.started", "application", VERSION)
-        startup_db.commit()
     application_logger = logging.getLogger("aiopt.application")
     application_logger.info("TokenScope data directory: %s", application_data_dir())
     application_logger.info("TokenScope database: %s", DEFAULT_DB)
@@ -60,7 +53,7 @@ async def lifespan(_: FastAPI):
     engine.dispose()
 
 desktop_runtime = os.getenv("AIOPT_RUNTIME") == "desktop"
-app = FastAPI(title=f"{APP_NAME} API", version=VERSION, lifespan=lifespan, dependencies=[Depends(authorize)],
+app = FastAPI(title=f"{APP_NAME} API", version=VERSION, lifespan=lifespan,
               docs_url=None if desktop_runtime else "/docs",
               redoc_url=None if desktop_runtime else "/redoc",
               openapi_url=None if desktop_runtime else "/openapi.json")
@@ -96,35 +89,20 @@ async def security_headers(request: Request, call_next):
     configured_key=os.getenv("TOKENSCOPE_API_KEY")
     desktop_key=os.getenv("AIOPT_DESKTOP_TOKEN")
     is_health = request.url.path == "/api/v1/health"
-    is_cors_preflight = request.method == "OPTIONS" and "origin" in request.headers and "access-control-request-method" in request.headers
     requires_auth = bool(
-        not is_cors_preflight
-        and (
-            (configured_key and not is_health)
-            or (desktop_key and (is_health or request.url.path.startswith(("/api/v1/administration", "/api/v1/audit")) or (request.method != "GET" and not is_ingestion)))
-        )
+        (configured_key and not is_health)
+        or (desktop_key and (is_health or (request.method != "GET" and not is_ingestion)))
     )
     if requires_auth and request.url.path.startswith("/api/v1"):
         supplied_key = request.headers.get("X-TokenScope-Key", "")
         valid_key = any(secrets.compare_digest(supplied_key, candidate) for candidate in (configured_key, desktop_key) if candidate)
         if not valid_key:
-            with SessionLocal() as audit_db:
-                audit(audit_db, "authentication.denied", "api", outcome="failure", actor="unauthenticated")
-                audit_db.commit()
             return JSONResponse({"detail":"Authentication required"},status_code=401)
     if is_ingestion:
         client=request.client.host if request.client else "unknown"
         if not rate_limiter.allow(client): return JSONResponse({"detail":"Ingestion rate limit exceeded"},status_code=429,headers={"Retry-After":"60"})
     started=datetime.now(timezone.utc)
     response = await call_next(request)
-    if response.status_code in {401, 403} or (request.method not in {"GET", "HEAD", "OPTIONS"}) or request.url.path.endswith((".csv", "/export")):
-        with SessionLocal() as audit_db:
-            identity = getattr(request.state, "identity", None)
-            audit(audit_db, "authorization.denied" if response.status_code == 403 else "api.action",
-                  "api", outcome="success" if response.status_code < 400 else "failure",
-                  actor=identity.subject if identity else "unauthenticated", method=request.method,
-                  route=getattr(request.scope.get("route"), "path", "unmatched"), status=response.status_code)
-            audit_db.commit()
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
@@ -139,12 +117,7 @@ def db_session():
     finally: db.close()
 
 def audit(db,action,target_type,target_id=None,**details):
-    outcome = details.pop("outcome", "success")
-    actor = details.pop("actor", actor_context.get())
-    safe = {key: value for key, value in details.items() if not any(word in key.lower() for word in ("password", "token", "secret", "credential"))}
-    db.add(AuditEvent(action=action,target_type=target_type,target_id=target_id,outcome=outcome,details={**safe,"actor":actor}))
-
-register_administration(app, db_session, audit)
+    db.add(AuditEvent(action=action,target_type=target_type,target_id=target_id,details=details))
 
 def save_event(db: Session, payload: EventCreate):
     values = payload.model_dump()
@@ -186,7 +159,7 @@ def ensure_aware(value: datetime | None) -> datetime | None:
 @app.get("/api/v1/health")
 def health(db: Session = Depends(db_session)):
     count = db.scalar(select(func.count()).select_from(TelemetryEvent)) or 0
-    return {"status":"healthy", "version":VERSION, "database":db.bind.dialect.name, "events":count, "privacy_mode":"metadata_only", "services":{name:{"status":"Healthy","checked":True} for name in ("application","api","database","telemetry_receiver","forecast_engine")}}
+    return {"status":"healthy", "database":"sqlite", "events":count, "privacy_mode":"metadata_only", "services":{name:{"status":"Healthy","checked":True} for name in ("application","api","database","telemetry_receiver","forecast_engine")}}
 
 @app.get("/api/v1/application")
 def application_status(db: Session = Depends(db_session)):
@@ -263,11 +236,11 @@ def overview(days: int = Query(30, ge=1, le=365), db: Session = Depends(db_sessi
     since = datetime.now(timezone.utc) - timedelta(days=days)
     where = TelemetryEvent.timestamp >= since
     totals = db.execute(select(func.count(), func.coalesce(func.sum(TelemetryEvent.total_tokens),0), func.coalesce(func.sum(TelemetryEvent.estimated_total_cost),0), func.coalesce(func.avg(TelemetryEvent.latency_ms),0), func.coalesce(func.sum(func.cast(TelemetryEvent.success == False, Integer)),0)).where(where)).one()
-    by_model = db.execute(select(TelemetryEvent.model, func.count(), func.sum(TelemetryEvent.total_tokens), func.sum(TelemetryEvent.estimated_total_cost)).where(where).group_by(TelemetryEvent.model).order_by(func.sum(TelemetryEvent.total_tokens).desc()).limit(100)).all()
-    by_app = db.execute(select(TelemetryEvent.application, TelemetryEvent.department, func.count(), func.sum(TelemetryEvent.total_tokens), func.sum(TelemetryEvent.estimated_total_cost)).where(where).group_by(TelemetryEvent.application, TelemetryEvent.department).order_by(func.sum(TelemetryEvent.total_tokens).desc()).limit(100)).all()
-    series = db.execute(select(day_bucket(TelemetryEvent.timestamp), func.count(), func.sum(TelemetryEvent.total_tokens), func.sum(TelemetryEvent.estimated_total_cost)).where(where).group_by(day_bucket(TelemetryEvent.timestamp)).order_by(day_bucket(TelemetryEvent.timestamp))).all()
+    by_model = db.execute(select(TelemetryEvent.model, func.count(), func.sum(TelemetryEvent.total_tokens), func.sum(TelemetryEvent.estimated_total_cost)).where(where).group_by(TelemetryEvent.model).order_by(func.sum(TelemetryEvent.total_tokens).desc())).all()
+    by_app = db.execute(select(TelemetryEvent.application, TelemetryEvent.department, func.count(), func.sum(TelemetryEvent.total_tokens), func.sum(TelemetryEvent.estimated_total_cost)).where(where).group_by(TelemetryEvent.application, TelemetryEvent.department).order_by(func.sum(TelemetryEvent.total_tokens).desc())).all()
+    series = db.execute(select(func.date(TelemetryEvent.timestamp), func.count(), func.sum(TelemetryEvent.total_tokens), func.sum(TelemetryEvent.estimated_total_cost)).where(where).group_by(func.date(TelemetryEvent.timestamp)).order_by(func.date(TelemetryEvent.timestamp))).all()
     requests, tokens, spend, latency, failures = totals
-    return {"ranking_limit":100,"period_days":days,"is_empty":requests==0,"is_demo":bool(db.scalar(select(func.count()).select_from(TelemetryEvent).where(TelemetryEvent.source=="demo"))),"totals":{"requests":requests,"tokens":tokens,"spend":round(spend,4),"average_latency_ms":round(latency,1),"success_rate":round((requests-failures)/requests*100,2) if requests else 0},"models":[{"model":r[0],"requests":r[1],"tokens":r[2],"spend":round(r[3],4)} for r in by_model],"applications":[{"application":r[0],"department":r[1],"requests":r[2],"tokens":r[3],"spend":round(r[4],4)} for r in by_app],"timeseries":[{"date":r[0],"requests":r[1],"tokens":r[2],"spend":round(r[3],4)} for r in series]}
+    return {"period_days":days,"is_empty":requests==0,"is_demo":bool(db.scalar(select(func.count()).select_from(TelemetryEvent).where(TelemetryEvent.source=="demo"))),"totals":{"requests":requests,"tokens":tokens,"spend":round(spend,4),"average_latency_ms":round(latency,1),"success_rate":round((requests-failures)/requests*100,2) if requests else 0},"models":[{"model":r[0],"requests":r[1],"tokens":r[2],"spend":round(r[3],4)} for r in by_model],"applications":[{"application":r[0],"department":r[1],"requests":r[2],"tokens":r[3],"spend":round(r[4],4)} for r in by_app],"timeseries":[{"date":r[0],"requests":r[1],"tokens":r[2],"spend":round(r[3],4)} for r in series]}
 
 FILTER_FIELDS = {"provider":TelemetryEvent.provider,"model":TelemetryEvent.model,"department":TelemetryEvent.department,"team":TelemetryEvent.team,"application":TelemetryEvent.application,"workload":TelemetryEvent.workload}
 
@@ -279,17 +252,15 @@ def filters_for(days, provider=None, model=None, department=None, team=None, app
 
 @app.get("/api/v1/filters")
 def filter_options(db: Session = Depends(db_session)):
-    return {name:[row[0] for row in db.execute(select(column).distinct().where(column.is_not(None)).order_by(column).limit(500)).all()] for name,column in FILTER_FIELDS.items()}
+    return {name:[row[0] for row in db.execute(select(column).distinct().where(column.is_not(None)).order_by(column)).all()] for name,column in FILTER_FIELDS.items()}
 
 @app.get("/api/v1/analytics")
-def analytics(group_by: str = Query("application", pattern="^(provider|model|department|team|application|workload|day|hour)$"), days: int = Query(30, ge=1, le=365), provider: str|None=None, model: str|None=None, department: str|None=None, team: str|None=None, application: str|None=None, workload: str|None=None, db: Session = Depends(db_session), limit: int = Query(100,ge=1,le=1000), offset: int = Query(0,ge=0,le=10000000)):
+def analytics(group_by: str = Query("application", pattern="^(provider|model|department|team|application|workload|day|hour)$"), days: int = Query(30, ge=1, le=365), provider: str|None=None, model: str|None=None, department: str|None=None, team: str|None=None, application: str|None=None, workload: str|None=None, db: Session = Depends(db_session)):
     clauses=filters_for(days,provider,model,department,team,application,workload)
-    dimension=day_bucket(TelemetryEvent.timestamp) if group_by=="day" else (hour_bucket(TelemetryEvent.timestamp) if group_by=="hour" else FILTER_FIELDS[group_by])
-    rows=db.execute(select(dimension.label("name"),func.count(),func.sum(func.cast(TelemetryEvent.success==True,Integer)),func.sum(TelemetryEvent.input_tokens),func.sum(TelemetryEvent.output_tokens),func.sum(TelemetryEvent.cached_input_tokens),func.sum(TelemetryEvent.reasoning_tokens),func.sum(TelemetryEvent.total_tokens),func.avg(TelemetryEvent.total_tokens),func.sum(TelemetryEvent.estimated_input_cost),func.sum(TelemetryEvent.estimated_output_cost),func.sum(TelemetryEvent.estimated_total_cost)).where(*clauses).group_by(dimension).order_by(func.sum(TelemetryEvent.total_tokens).desc(),dimension).offset(offset).limit(limit+1)).all()
-    items=[{"name":r[0] or "Unassigned","requests":r[1],"successful_requests":r[2] or 0,"failed_requests":r[1]-(r[2] or 0),"input_tokens":r[3] or 0,"output_tokens":r[4] or 0,"cached_tokens":r[5] or 0,"reasoning_tokens":r[6] or 0,"total_tokens":r[7] or 0,"average_tokens_per_request":round(r[8] or 0,1),"input_spend":round(r[9] or 0,4),"output_spend":round(r[10] or 0,4),"total_spend":round(r[11] or 0,4),"cost_per_request":round((r[11] or 0)/r[1],6) if r[1] else 0,"cost_per_successful_request":round((r[11] or 0)/(r[2] or 1),6)} for r in rows[:limit]]
-    total=db.execute(select(func.count(),func.sum(TelemetryEvent.total_tokens),func.sum(TelemetryEvent.estimated_total_cost),func.sum(case((TelemetryEvent.success==False,1),else_=0)),func.sum(TelemetryEvent.cached_input_tokens)).where(*clauses)).one()
-    totals=dict(zip(("requests","tokens","spend","failed","cached"),(value or 0 for value in total)))
-    return {"totals":totals,"limit":limit,"offset":offset,"has_more":len(rows)>limit,"group_by":group_by,"period_days":days,"filters":{"provider":provider,"model":model,"department":department,"team":team,"application":application,"workload":workload},"items":items}
+    dimension=func.date(TelemetryEvent.timestamp) if group_by=="day" else (func.strftime("%H:00",TelemetryEvent.timestamp) if group_by=="hour" else FILTER_FIELDS[group_by])
+    rows=db.execute(select(dimension.label("name"),func.count(),func.sum(func.cast(TelemetryEvent.success==True,Integer)),func.sum(TelemetryEvent.input_tokens),func.sum(TelemetryEvent.output_tokens),func.sum(TelemetryEvent.cached_input_tokens),func.sum(TelemetryEvent.reasoning_tokens),func.sum(TelemetryEvent.total_tokens),func.avg(TelemetryEvent.total_tokens),func.sum(TelemetryEvent.estimated_input_cost),func.sum(TelemetryEvent.estimated_output_cost),func.sum(TelemetryEvent.estimated_total_cost)).where(*clauses).group_by(dimension).order_by(func.sum(TelemetryEvent.total_tokens).desc())).all()
+    items=[{"name":r[0] or "Unassigned","requests":r[1],"successful_requests":r[2] or 0,"failed_requests":r[1]-(r[2] or 0),"input_tokens":r[3] or 0,"output_tokens":r[4] or 0,"cached_tokens":r[5] or 0,"reasoning_tokens":r[6] or 0,"total_tokens":r[7] or 0,"average_tokens_per_request":round(r[8] or 0,1),"input_spend":round(r[9] or 0,4),"output_spend":round(r[10] or 0,4),"total_spend":round(r[11] or 0,4),"cost_per_request":round((r[11] or 0)/r[1],6) if r[1] else 0,"cost_per_successful_request":round((r[11] or 0)/(r[2] or 1),6)} for r in rows]
+    return {"group_by":group_by,"period_days":days,"filters":{"provider":provider,"model":model,"department":department,"team":team,"application":application,"workload":workload},"items":items}
 
 @app.get("/api/v1/pricing")
 def pricing_registry(db: Session = Depends(db_session)):
@@ -333,12 +304,12 @@ def forecast(metric: str = Query("total_tokens"), horizon: int = Query(30), trai
     if metric not in METRICS: raise HTTPException(400,f"metric must be one of {sorted(METRICS)}")
     if horizon not in (7,30,90,365): raise HTTPException(400,"horizon must be 7, 30, 90, or 365 days")
     clauses=filters_for(training_days,provider,model,department,team,application,workload); expression=FORECAST_METRICS[metric]
-    rows=db.execute(select(day_bucket(TelemetryEvent.timestamp),expression).where(*clauses).group_by(day_bucket(TelemetryEvent.timestamp)).order_by(day_bucket(TelemetryEvent.timestamp))).all()
+    rows=db.execute(select(func.date(TelemetryEvent.timestamp),expression).where(*clauses).group_by(func.date(TelemetryEvent.timestamp)).order_by(func.date(TelemetryEvent.timestamp))).all()
     if not rows: raise HTTPException(422,"More historical data is needed for a reliable forecast. No observations match these filters.")
     start=datetime.fromisoformat(rows[0][0]).date();end=datetime.fromisoformat(rows[-1][0]).date();lookup={row[0]:float(row[1] or 0) for row in rows};dates=[];values=[];cursor=start
     while cursor<=end:
         key=cursor.isoformat();dates.append(key);values.append(lookup.get(key,0));cursor+=timedelta(days=1)
-    app_rows=db.execute(select(TelemetryEvent.application,expression).where(*clauses).group_by(TelemetryEvent.application).order_by(expression.desc()).limit(100)).all()
+    app_rows=db.execute(select(TelemetryEvent.application,expression).where(*clauses).group_by(TelemetryEvent.application).order_by(expression.desc())).all()
     applications=[{"name":row[0],"value":float(row[1] or 0)} for row in app_rows]
     try: result=run_forecast(dates,values,horizon)
     except InsufficientHistory as error: raise HTTPException(422,str(error)) from error
@@ -356,8 +327,7 @@ def forecast_runs(limit: int = Query(20,ge=1,le=100), db: Session = Depends(db_s
 @app.get("/api/v1/anomalies")
 def anomalies(days: int = Query(90,ge=14,le=365), limit: int = Query(30,ge=1,le=100), db: Session = Depends(db_session)):
     clauses=filters_for(days)
-    rows=db.execute(select(TelemetryEvent.application,day_bucket(TelemetryEvent.timestamp),func.sum(TelemetryEvent.total_tokens)).where(*clauses).group_by(TelemetryEvent.application,day_bucket(TelemetryEvent.timestamp)).order_by(TelemetryEvent.application,day_bucket(TelemetryEvent.timestamp)).limit(100001)).all()
-    if len(rows)>100000: raise HTTPException(422,"Too many application/day groups; narrow the analysis period")
+    rows=db.execute(select(TelemetryEvent.application,func.date(TelemetryEvent.timestamp),func.sum(TelemetryEvent.total_tokens)).where(*clauses).group_by(TelemetryEvent.application,func.date(TelemetryEvent.timestamp)).order_by(TelemetryEvent.application,func.date(TelemetryEvent.timestamp))).all()
     grouped={}
     for application,date,value in rows: grouped.setdefault(application,[]).append({"date":date,"value":value or 0})
     findings=detect(grouped,limit)
@@ -366,8 +336,7 @@ def anomalies(days: int = Query(90,ge=14,le=365), limit: int = Query(30,ge=1,le=
 @app.get("/api/v1/optimization")
 def optimization(days: int = Query(30,ge=7,le=365), db: Session = Depends(db_session)):
     clauses=filters_for(days)
-    rows=db.execute(select(TelemetryEvent.application,TelemetryEvent.model,func.count(),func.sum(TelemetryEvent.estimated_total_cost),func.sum(TelemetryEvent.input_tokens),func.sum(TelemetryEvent.estimated_input_cost),func.avg(func.coalesce(TelemetryEvent.context_utilization,0)),func.sum(case((TelemetryEvent.retry_count>0,1),else_=0)),func.sum(case((TelemetryEvent.retry_count>0,TelemetryEvent.estimated_total_cost),else_=0)),func.sum(case((TelemetryEvent.success==False,1),else_=0)),func.sum(case((TelemetryEvent.success==False,TelemetryEvent.estimated_total_cost),else_=0)),func.sum(case((TelemetryEvent.cache_hit==True,1),else_=0)),func.sum(TelemetryEvent.output_tokens)).where(*clauses).group_by(TelemetryEvent.application,TelemetryEvent.model).limit(10001)).all()
-    if len(rows)>10000: raise HTTPException(422,"Too many application/model groups; narrow the analysis period")
+    rows=db.execute(select(TelemetryEvent.application,TelemetryEvent.model,func.count(),func.sum(TelemetryEvent.estimated_total_cost),func.sum(TelemetryEvent.input_tokens),func.sum(TelemetryEvent.estimated_input_cost),func.avg(func.coalesce(TelemetryEvent.context_utilization,0)),func.sum(case((TelemetryEvent.retry_count>0,1),else_=0)),func.sum(case((TelemetryEvent.retry_count>0,TelemetryEvent.estimated_total_cost),else_=0)),func.sum(case((TelemetryEvent.success==False,1),else_=0)),func.sum(case((TelemetryEvent.success==False,TelemetryEvent.estimated_total_cost),else_=0)),func.sum(case((TelemetryEvent.cache_hit==True,1),else_=0)),func.sum(TelemetryEvent.output_tokens)).where(*clauses).group_by(TelemetryEvent.application,TelemetryEvent.model)).all()
     apps=[]
     for r in rows:
         requests=r[2] or 1;output=r[12] or 1
@@ -498,7 +467,7 @@ CLOUD_CATALOG=[
 ]
 
 def cloud_dict(row):
-    return {"provider":row.provider,"enabled":row.enabled,"credential_env_var":row.credential_env_var,**credential_status(row.credential_env_var),"endpoint":row.endpoint,"updated_at":row.updated_at}
+    return {"provider":row.provider,"enabled":row.enabled,"credential_env_var":row.credential_env_var,"credential_available":bool(os.getenv(row.credential_env_var)),"endpoint":row.endpoint,"updated_at":row.updated_at,"secret_stored":False}
 
 @app.get("/api/v1/cloud-providers")
 def cloud_providers(db: Session = Depends(db_session)):
@@ -528,7 +497,7 @@ def get_retention(db: Session = Depends(db_session)):
 
 @app.put("/api/v1/settings/retention")
 def set_retention(payload: RetentionRequest, db: Session = Depends(db_session)):
-    value={"days":payload.days,"automatic_deletion":False,"enforcement_enabled":payload.enforcement_enabled,"notice":"Enable enforcement, preview affected records, then use the explicit apply endpoint to delete records outside this window."};row=db.get(AppSetting,"retention")
+    value={"days":payload.days,"automatic_deletion":False,"notice":"Use the explicit apply endpoint to delete records outside this window."};row=db.get(AppSetting,"retention")
     if row: row.value=value
     else: db.add(AppSetting(key="retention",value=value))
     audit(db,"retention.configured","setting","retention",days=payload.days);db.commit();return value
@@ -537,7 +506,6 @@ def set_retention(payload: RetentionRequest, db: Session = Depends(db_session)):
 def apply_retention(db: Session = Depends(db_session)):
     row=db.get(AppSetting,"retention")
     if not row or not row.value.get("days"): raise HTTPException(400,"A finite retention period must be configured first")
-    if not row.value.get("enforcement_enabled", False): raise HTTPException(400,"An administrator must explicitly enable retention enforcement")
     cutoff=datetime.now(timezone.utc)-timedelta(days=row.value["days"]);result=db.execute(delete(TelemetryEvent).where(TelemetryEvent.timestamp<cutoff));audit(db,"retention.applied","telemetry",details_count=result.rowcount,cutoff=cutoff.date().isoformat());db.commit();return {"deleted":result.rowcount,"cutoff":cutoff}
 
 @app.get("/api/v1/audit")
@@ -548,19 +516,16 @@ def audit_log(limit: int=Query(100,ge=1,le=1000),db: Session=Depends(db_session)
 def export_configuration(db: Session = Depends(db_session)):
     return {"exported_at":datetime.now(timezone.utc),"retention":get_retention(db),"pricing_overrides":[{"model_id":x.model_id,"provider":x.provider,"input_price_per_million":x.input_price_per_million,"output_price_per_million":x.output_price_per_million,"cached_input_price_per_million":x.cached_input_price_per_million,"currency":x.currency} for x in db.execute(select(PriceOverride)).scalars().all()],"budgets":[{"name":x.name,"scope_type":x.scope_type,"scope_value":x.scope_value,"period":x.period,"amount":x.amount,"currency":x.currency} for x in db.execute(select(Budget)).scalars().all()],"cloud_providers":[cloud_dict(x) for x in db.execute(select(CloudProviderConfig)).scalars().all()],"secrets_included":False}
 
-@app.get("/api/v1/export/events.csv")
-def export_events(limit: int=Query(100000,ge=1,le=100000), offset: int=Query(0,ge=0,le=10000000)):
-    fields=["event_id","timestamp","department","team","application","workload","provider","model","input_tokens","output_tokens","cached_input_tokens","total_tokens","latency_ms","success","estimated_total_cost","source"]
-    def stream():
-        with SessionLocal() as db:
-            buffer=io.StringIO();writer=csv.writer(buffer);writer.writerow(fields)
-            yield buffer.getvalue();buffer.seek(0);buffer.truncate(0)
-            rows=db.execute(select(*(getattr(TelemetryEvent,key) for key in fields)).order_by(TelemetryEvent.timestamp.desc(),TelemetryEvent.event_id).offset(offset).limit(limit).execution_options(yield_per=1000))
-            for row in rows:
-                writer.writerow([csv_safe(value) for value in row])
-                yield buffer.getvalue();buffer.seek(0);buffer.truncate(0)
-    return StreamingResponse(stream(),media_type="text/csv",headers={"Content-Disposition":"attachment; filename=tokenscope-events.csv"})
+def csv_safe(value):
+    text="" if value is None else str(value)
+    return "'"+text if text.startswith(("=","+","-","@")) else text
 
+@app.get("/api/v1/export/events.csv")
+def export_events(limit: int=Query(100000,ge=1,le=100000),db: Session=Depends(db_session)):
+    rows=db.execute(select(TelemetryEvent).order_by(TelemetryEvent.timestamp.desc()).limit(limit)).scalars().all();buffer=io.StringIO();fields=["event_id","timestamp","department","team","application","workload","provider","model","input_tokens","output_tokens","cached_input_tokens","total_tokens","latency_ms","success","estimated_total_cost","source"]
+    writer=csv.DictWriter(buffer,fieldnames=fields);writer.writeheader()
+    for row in rows: writer.writerow({key:csv_safe(getattr(row,key)) for key in fields})
+    return Response(buffer.getvalue(),media_type="text/csv",headers={"Content-Disposition":"attachment; filename=tokenscope-events.csv"})
 
 def live_snapshot(db):
     since=datetime.now(timezone.utc)-timedelta(minutes=1)
@@ -612,7 +577,7 @@ def set_privacy(payload:PrivacyRequest,db:Session=Depends(db_session)):
 @app.get("/api/v1/reports/executive")
 def executive_report(days:int=Query(30,ge=7,le=365),db:Session=Depends(db_session)):
     overview_data=overview(days,db);optimization_data=optimization(days,db);anomaly_data=anomalies(max(14,days),10,db);budget_data=list_budgets(db)
-    latest=db.execute(select(ForecastRun).order_by(ForecastRun.created_at.desc()).limit(1)).scalars().first()
+    latest=db.execute(select(ForecastRun).order_by(ForecastRun.created_at.desc())).scalars().first()
     return {"title":"TokenScope Executive AI Usage Report","generated_at":datetime.now(timezone.utc),"period_days":days,"labels":{"usage":"OBSERVED","spend":"ESTIMATED","forecast":"FORECASTED","savings":"ESTIMATED"},"usage":overview_data["totals"],"largest_applications":overview_data["applications"][:5],"largest_models":overview_data["models"][:5],"optimization":optimization_data["summary"],"top_opportunities":optimization_data["recommendations"][:5],"anomalies":{"count":len(anomaly_data["anomalies"]),"items":anomaly_data["anomalies"][:5]},"budgets":budget_data["budgets"],"latest_forecast":None if not latest else {"metric":latest.metric,"horizon_days":latest.horizon_days,"model":latest.selected_model,"smape":latest.error_value,"created_at":latest.created_at},"privacy":"Metadata-only analytics; prompt and response content are not required."}
 
 @app.get("/api/v1/reports/executive.csv")
@@ -635,13 +600,9 @@ def model_stats(db,model,days):
     return {"model":model,"provider":identity[0] if identity else price.provider,"deployment":identity[1] if identity else "unknown","input_price_per_million":price.input,"output_price_per_million":price.output,"cached_input_price_per_million":price.cached,"requests":requests,"success_rate":round((row[1] or 0)/requests*100,2) if requests else None,"observed_latency_ms":round(float(row[2]),2) if requests else None,"observed_tokens_per_second":round(float(row[3]),2) if requests else None,"historical_cost":round(float(row[4]),4),"average_context_tokens":round(float(row[5]),1) if requests else None,"average_context_utilization":round(float(row[6]),4) if requests else None,"observed_total_tokens":row[7] or 0,"estimated_monthly_cost_at_observed_rate":round(float(row[4])*30/days,4),"quality_metrics":evaluation_summary(db,model)}
 
 @app.get("/api/v1/models/inventory")
-def model_inventory(days:int=Query(30,ge=1,le=365),db:Session=Depends(db_session),limit:int=Query(100,ge=1,le=500),offset:int=Query(0,ge=0,le=10000000)):
-    known=[x["model_id"] for x in registry(db)]
-    query=select(TelemetryEvent.model.label("name"))
-    if known: query=query.union(*(select(literal(name).label("name")) for name in known))
-    names=query.subquery()
-    models=list(db.scalars(select(names.c.name).order_by(names.c.name).offset(offset).limit(limit+1)))
-    return {"period_days":days,"models":[model_stats(db,model,days) for model in models[:limit]],"limit":limit,"offset":offset,"has_more":len(models)>limit,"quality_policy":"Quality metrics appear only when supplied through the evaluation API."}
+def model_inventory(days:int=Query(30,ge=1,le=365),db:Session=Depends(db_session)):
+    observed=[row[0] for row in db.execute(select(TelemetryEvent.model).distinct()).all()];known=[x["model_id"] for x in registry(db)];models=sorted(set(observed+known))
+    return {"period_days":days,"models":[model_stats(db,model,days) for model in models],"quality_policy":"Quality metrics appear only when supplied through the evaluation API."}
 
 @app.get("/api/v1/models/compare")
 def compare_models(models:str,days:int=Query(30,ge=1,le=365),db:Session=Depends(db_session)):
@@ -831,7 +792,6 @@ async def commit_import(import_id: str, payload: ImportCommit, db: Session = Dep
         raise HTTPException(400, "Column mapping is required before committing an import")
     
     # Update status
-    audit(db, "import.started", "import", import_id)
     job.status = "IMPORTING"
     job.started_at = datetime.now(timezone.utc)
     job.mapping = payload.mapping
@@ -845,8 +805,6 @@ async def commit_import(import_id: str, payload: ImportCommit, db: Session = Dep
             chunk_size=1000
         )
         
-        audit(db, "import.completed", "import", import_id, inserted_rows=results["inserted_rows"])
-        db.commit()
         return {
             "import_id": import_id,
             "status": "COMPLETED",
@@ -860,7 +818,6 @@ async def commit_import(import_id: str, payload: ImportCommit, db: Session = Dep
         db.rollback()
         job = db.get(ImportJob, import_id)
         if job:
-            audit(db, "import.failed", "import", import_id, outcome="failure")
             job.status = "FAILED"
             job.failure_reason = str(e)[:500]
             job.completed_at = datetime.now(timezone.utc)

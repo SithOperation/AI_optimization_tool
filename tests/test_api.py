@@ -318,7 +318,7 @@ def test_cloud_provider_stores_env_reference_not_secret(monkeypatch):
         assert result.json()["secret_stored"] is False
         exported=client.get("/api/v1/export/configuration").text
         assert "secret-value-that-must-not-be-exported" not in exported
-        assert any(row["action"] == "cloud_provider.configured" for row in client.get("/api/v1/audit").json())
+        assert client.get("/api/v1/audit").json()[0]["action"] == "cloud_provider.configured"
 
 def test_optional_api_key_authentication(monkeypatch):
     monkeypatch.setenv("TOKENSCOPE_API_KEY","test-secret")
@@ -333,7 +333,7 @@ def test_retention_requires_explicit_apply_and_csv_is_formula_safe():
     with TestClient(app) as client:
         client.post("/api/v1/events",json=payload)
         assert "'=DANGEROUS" in client.get("/api/v1/export/events.csv").text
-        configured=client.put("/api/v1/settings/retention",json={"days":30,"enforcement_enabled":True}).json()
+        configured=client.put("/api/v1/settings/retention",json={"days":30}).json()
         assert configured["automatic_deletion"] is False
         assert client.get("/api/v1/health").json()["events"] == 1
         applied=client.post("/api/v1/settings/retention/apply").json()
@@ -368,7 +368,7 @@ def test_privacy_controls_warn_when_content_is_enabled():
         assert defaults["collect_prompt"] is False
         saved=client.put("/api/v1/settings/privacy",json=payload).json()
         assert saved["content_warning"] is True
-        audit=next(row for row in client.get("/api/v1/audit").json() if row["action"]=="privacy.configured")
+        audit=client.get("/api/v1/audit").json()[0]
         assert audit["details"]["content_enabled"] is True
 
 def test_live_snapshot_reports_recent_local_activity():
@@ -404,7 +404,7 @@ def test_user_evaluation_is_validated_audited_and_displayed():
         inventory=client.get("/api/v1/models/inventory").json()
         model=next(x for x in inventory["models"] if x["model"]=="llama-3.1-8b")
         assert model["quality_metrics"][0]["normalized_score_percent"] == 92
-        assert any(row["action"] == "model_evaluation.created" for row in client.get("/api/v1/audit").json())
+        assert client.get("/api/v1/audit").json()[0]["action"] == "model_evaluation.created"
 
 def test_evaluation_rejects_score_outside_scale():
     payload={"model":"test","metric":"accuracy","score":110,"maximum_score":100,"source":"Invalid test"}
@@ -415,7 +415,7 @@ def test_application_directories_and_version(tmp_path):
     paths=ensure_application_directories(tmp_path)
     assert set(paths)==set(DATA_SUBDIRECTORIES)
     assert all(path.is_dir() for path in paths.values())
-    assert VERSION=="0.16.0"
+    assert VERSION=="0.15.0"
 
 def test_first_run_completion_privacy_and_mode_persistence():
     with TestClient(app) as client:

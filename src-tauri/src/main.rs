@@ -109,8 +109,7 @@ fn lifecycle_log(app: &AppHandle, message: &str) {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let record = serde_json::json!({"timestamp_unix": timestamp, "level": "INFO", "component": "desktop.lifecycle", "message": message});
-        let _ = writeln!(file, "{record}");
+        let _ = writeln!(file, "{timestamp} {message}");
     }
 }
 

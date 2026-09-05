@@ -1,7 +1,6 @@
 param(
     [string]$Executable = "src-tauri\binaries\aiopt-backend\aiopt-backend.exe",
-    [int]$StartupTimeoutSeconds = 90,
-    [string]$ImportFixture = ''
+    [int]$StartupTimeoutSeconds = 90
 )
 $ErrorActionPreference = 'Stop'
 $RepoRoot = Split-Path -Parent $PSScriptRoot
@@ -42,13 +41,9 @@ try {
         throw 'Packaged backend opened a non-loopback listener.'
     }
     $Application = Invoke-RestMethod 'http://127.0.0.1:8000/api/v1/application'
-    if ($Application.version -ne '0.16.0') { throw "Unexpected packaged backend version: $($Application.version)" }
+    if ($Application.version -ne '0.15.0') { throw "Unexpected packaged backend version: $($Application.version)" }
     $ImportHistory = Invoke-RestMethod 'http://127.0.0.1:8000/api/v1/import/history'
     if ($null -eq $ImportHistory) { throw 'Packaged import-history route failed.' }
-    if ($ImportFixture) {
-        python (Join-Path $RepoRoot 'scripts\smoke-enterprise-api.py') $ImportFixture
-        if ($LASTEXITCODE -ne 0) { throw 'Packaged enterprise regression failed.' }
-    }
     Invoke-RestMethod 'http://127.0.0.1:8000/api/v1/demo?days=30' -Headers $Headers -Method Post | Out-Null
     $Forecast = Invoke-RestMethod 'http://127.0.0.1:8000/api/v1/forecasts?metric=total_tokens&horizon=7'
     if (-not $Forecast.forecast -or $Forecast.forecast.Count -ne 7) { throw 'Packaged forecast smoke test failed.' }
@@ -74,10 +69,7 @@ finally {
     $env:AIOPT_DATA_DIR = $PreviousDataDir
     $env:AIOPT_RUNTIME = $PreviousRuntime
     $env:AIOPT_DESKTOP_TOKEN = $PreviousDesktopToken
-    $VerifiedSmokeRoot = [System.IO.Path]::GetFullPath($SmokeRoot)
-    $VerifiedTempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\') + '\'
-    if (-not $VerifiedSmokeRoot.StartsWith($VerifiedTempRoot, [StringComparison]::OrdinalIgnoreCase) -or (Split-Path -Leaf $VerifiedSmokeRoot) -notlike 'aiopt-packaged-smoke-*') { throw 'Unsafe smoke cleanup path.' }
-    if (Test-Path -LiteralPath $VerifiedSmokeRoot) { Remove-Item -LiteralPath $VerifiedSmokeRoot -Recurse -Force }
+    if (Test-Path -LiteralPath $SmokeRoot) { Remove-Item -LiteralPath $SmokeRoot -Recurse -Force }
 }
 if (Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'aiopt-backend.exe' -and $_.ExecutablePath -eq $ExecutablePath }) {
     throw 'Packaged backend process remained after shutdown.'

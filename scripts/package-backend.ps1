@@ -11,10 +11,6 @@ if ($LASTEXITCODE -ne 0) { throw 'PyInstaller failed to package the backend.' }
 $Destination = Join-Path $RepoRoot 'src-tauri\binaries\aiopt-backend'
 $LegacyOneFile = Join-Path $RepoRoot 'src-tauri\binaries\aiopt-backend.exe'
 $LegacyReleaseOneFile = Join-Path $RepoRoot 'src-tauri\target\release\binaries\aiopt-backend.exe'
-$VerifiedRepoRoot = [System.IO.Path]::GetFullPath($RepoRoot).TrimEnd('\') + '\'
-foreach ($TargetPath in @($Destination, $LegacyOneFile, $LegacyReleaseOneFile)) {
-    if (-not [System.IO.Path]::GetFullPath($TargetPath).StartsWith($VerifiedRepoRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'Packaging target is outside the repository.' }
-}
 if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Recurse -Force }
 if (Test-Path -LiteralPath $LegacyOneFile) { Remove-Item -LiteralPath $LegacyOneFile -Force }
 if (Test-Path -LiteralPath $LegacyReleaseOneFile) { Remove-Item -LiteralPath $LegacyReleaseOneFile -Force }
