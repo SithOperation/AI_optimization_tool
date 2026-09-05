@@ -155,6 +155,7 @@ class CloudProviderRequest(StrictModel):
 
 class RetentionRequest(StrictModel):
     days: int | None = Field(default=90, ge=30, le=3650)
+    enforcement_enabled: bool = False
 
 class PrivacyRequest(StrictModel):
     collect_token_counts: bool = True

@@ -17,7 +17,7 @@ from apps.api.tokenscope_api.main import app
 
 def test_openapi_version_and_security_import_routes_are_present():
     schema = app.openapi()
-    assert schema["info"]["version"] == "0.15.0"
+    assert schema["info"]["version"] == "0.16.0"
     expected = {
         "/api/v1/health",
         "/api/v1/telemetry",
@@ -48,6 +48,22 @@ def test_malicious_origin_is_not_allowed_by_cors():
         )
     assert response.status_code == 400
     assert "access-control-allow-origin" not in response.headers
+
+
+def test_authenticated_desktop_request_can_complete_cors_preflight(monkeypatch):
+    monkeypatch.setenv("AIOPT_DESKTOP_TOKEN", "launch-secret")
+    with TestClient(app) as client:
+        response = client.options(
+            "/api/v1/application",
+            headers={
+                "Origin": "http://tauri.localhost",
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "x-tokenscope-key",
+            },
+        )
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://tauri.localhost"
+    assert "x-tokenscope-key" in response.headers["access-control-allow-headers"].lower()
 
 
 def test_desktop_token_protects_telemetry_reset(monkeypatch):

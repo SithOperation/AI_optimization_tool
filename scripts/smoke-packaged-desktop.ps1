@@ -1,6 +1,8 @@
 param(
     [string]$Executable = "src-tauri\target\release\ai-optimization-tool.exe",
-    [int]$StartupTimeoutSeconds = 90
+    [int]$StartupTimeoutSeconds = 90,
+    [string]$SeedDatabase = '',
+    [int]$ExpectedEvents = 0
 )
 $ErrorActionPreference = 'Stop'
 $RepoRoot = Split-Path -Parent $PSScriptRoot
@@ -9,13 +11,23 @@ $BackendPath = [System.IO.Path]::GetFullPath((Join-Path $RepoRoot 'src-tauri\tar
 if (-not (Test-Path -LiteralPath $ExecutablePath)) { throw "Desktop executable not found: $ExecutablePath" }
 $SmokeRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("aiopt-desktop-smoke-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $SmokeRoot | Out-Null
+if ($SeedDatabase) {
+    $DatabaseDirectory = Join-Path $SmokeRoot 'AIOptimizationTool\database'
+    New-Item -ItemType Directory -Force -Path $DatabaseDirectory | Out-Null
+    Copy-Item -LiteralPath $SeedDatabase -Destination (Join-Path $DatabaseDirectory 'ai-optimization-tool.db')
+}
 $PreviousLocalAppData = $env:LOCALAPPDATA
 $LifecycleLogPath = Join-Path $PreviousLocalAppData 'com.aioptimizationtool.desktop\logs\desktop-lifecycle.log'
 $InitialLifecycleLineCount = if (Test-Path -LiteralPath $LifecycleLogPath) { @(Get-Content -LiteralPath $LifecycleLogPath).Count } else { 0 }
 $First = $null
+$PreferencesPath = Join-Path $env:APPDATA 'com.aioptimizationtool.desktop\lifecycle.json'
+$OriginalPreferences = if (Test-Path -LiteralPath $PreferencesPath) { [System.IO.File]::ReadAllBytes($PreferencesPath) } else { $null }
+$StartedAt = Get-Date
 try {
     $env:LOCALAPPDATA = $SmokeRoot
-    $First = Start-Process -FilePath $ExecutablePath -PassThru
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $PreferencesPath) | Out-Null
+    [System.IO.File]::WriteAllText($PreferencesPath, '{"keep_running_in_tray":false}')
+    $First = Start-Process -FilePath $ExecutablePath -PassThru -WindowStyle Hidden
     $Deadline = (Get-Date).AddSeconds($StartupTimeoutSeconds)
     do {
         Start-Sleep -Milliseconds 500
@@ -31,7 +43,13 @@ try {
         $Ready = @($LifecycleLines | Where-Object { $_ -match 'authenticated readiness passed pid=' })
     } while ($Ready.Count -ne 1 -and (Get-Date) -lt $Deadline)
     if ($Ready.Count -ne 1) { throw 'Desktop backend did not pass authenticated readiness.' }
-    $Second = Start-Process -FilePath $ExecutablePath -PassThru
+    Write-Host "Desktop cold launch to authenticated readiness: $([math]::Round(((Get-Date)-$StartedAt).TotalSeconds,3)) seconds"
+    if ($SeedDatabase) {
+        $Observed = Invoke-RestMethod 'http://127.0.0.1:8000/api/v1/analytics?days=365'
+        if ($Observed.totals.requests -ne $ExpectedEvents) { throw "Existing telemetry was not preserved: $($Observed.totals.requests), expected $ExpectedEvents" }
+        Write-Host "Existing telemetry preserved: $ExpectedEvents records"
+    }
+    $Second = Start-Process -FilePath $ExecutablePath -PassThru -WindowStyle Hidden
     $Second.WaitForExit(15000) | Out-Null
     Start-Sleep -Milliseconds 750
     $Frontends = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $ExecutablePath })
@@ -53,11 +71,36 @@ try {
     $Backends = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $BackendPath })
     if (-not $First.HasExited -or $Backends.Count -ne 0) { throw 'Tray-off close did not terminate frontend and owned backend.' }
     Write-Host 'Packaged desktop clean launch=1/1; duplicate launch=1/1; tray-off close=0/0'
+    [System.IO.File]::WriteAllText($PreferencesPath, '{"keep_running_in_tray":true}')
+    $First = Start-Process -FilePath $ExecutablePath -PassThru -WindowStyle Hidden
+    $Deadline = (Get-Date).AddSeconds($StartupTimeoutSeconds)
+    do {
+        Start-Sleep -Milliseconds 500
+        $First.Refresh()
+        $LifecycleLines = @(Get-Content -LiteralPath $LifecycleLogPath | Select-Object -Skip $InitialLifecycleLineCount)
+        $Ready = @($LifecycleLines | Where-Object { $_ -match 'authenticated readiness passed pid=' })
+    } while (($Ready.Count -lt 2 -or $First.MainWindowHandle -eq 0) -and (Get-Date) -lt $Deadline)
+    if ($Ready.Count -ne 2 -or -not $First.CloseMainWindow()) { throw 'Tray-on launch did not become ready.' }
+    Start-Sleep -Milliseconds 1000
+    $First.Refresh()
+    $Backends = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $BackendPath })
+    if ($First.HasExited -or $Backends.Count -ne 1) { throw 'Tray-on close did not preserve the owned backend.' }
+    $Second = Start-Process -FilePath $ExecutablePath -PassThru -WindowStyle Hidden
+    $Second.WaitForExit(15000) | Out-Null
+    Start-Sleep -Milliseconds 750
+    $First.Refresh()
+    if ($First.MainWindowHandle -eq 0) { throw 'Duplicate launch did not reopen the tray window.' }
+    Write-Host 'Packaged desktop tray-on close=1/1; duplicate launch reopens window; preferences restored after test'
 }
 finally {
     @(Get-CimInstance Win32_Process | Where-Object {
         $_.ExecutablePath -in @($ExecutablePath, $BackendPath)
     }) | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     $env:LOCALAPPDATA = $PreviousLocalAppData
-    if (Test-Path -LiteralPath $SmokeRoot) { Remove-Item -LiteralPath $SmokeRoot -Recurse -Force }
+    if ($null -ne $OriginalPreferences) { [System.IO.File]::WriteAllBytes($PreferencesPath, $OriginalPreferences) }
+    elseif (Test-Path -LiteralPath $PreferencesPath) { Remove-Item -LiteralPath $PreferencesPath -Force }
+    $VerifiedSmokeRoot = [System.IO.Path]::GetFullPath($SmokeRoot)
+    $VerifiedTempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+    if (-not $VerifiedSmokeRoot.StartsWith($VerifiedTempRoot, [StringComparison]::OrdinalIgnoreCase) -or (Split-Path -Leaf $VerifiedSmokeRoot) -notlike 'aiopt-desktop-smoke-*') { throw 'Unsafe smoke cleanup path.' }
+    if (Test-Path -LiteralPath $VerifiedSmokeRoot) { Remove-Item -LiteralPath $VerifiedSmokeRoot -Recurse -Force }
 }

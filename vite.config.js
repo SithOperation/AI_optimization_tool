@@ -2,6 +2,11 @@ import { defineConfig } from 'vite';
 
 const ignored = [
   '**/src-tauri/target/**',
+  '**/src-tauri/binaries/**',
+  '**/artifacts/**',
+  '**/.test-data/**',
+  '**/test-results/**',
+  '**/database/**',
   '**/.git/**',
   '**/node_modules/**',
 ];

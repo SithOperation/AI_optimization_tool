@@ -2,6 +2,82 @@ import { test, expect } from '@playwright/test';
 
 const pages = ['overview','usage','costs','models','forecasts','optimization','anomalies','budgets','scenario','reports','integrations','settings','import','pricing'];
 
+test('all inner pages maintain readable text and usable controls', async ({ page, request }, testInfo) => {
+  await completeSetup(request);
+  const measurements = [];
+  for (const name of pages) {
+    await page.goto('/#'+name);
+    await expect(page.locator('.shell')).toBeVisible();
+    const result = await page.evaluate(() => {
+      const visible = selector => [...document.querySelectorAll(selector)].filter(node => node.getClientRects().length && node.textContent.trim());
+      return {
+        body: parseFloat(getComputedStyle(document.body).fontSize),
+        small: visible('main p, main label, main small, main button, main th, main td, main .tag').filter(node => parseFloat(getComputedStyle(node).fontSize)<14).map(node => node.className),
+        inputs: [...document.querySelectorAll('main input:not([type=checkbox]):not([type=hidden]), main select')].filter(node => node.getClientRects().length).map(node => parseFloat(getComputedStyle(node).fontSize)),
+        heading: parseFloat(getComputedStyle(document.querySelector('main h1')).fontSize),
+      };
+    });
+    expect(result.body, name).toBeGreaterThanOrEqual(16);
+    expect(result.small, name).toEqual([]);
+    expect(result.inputs.every(size => size>=16), name).toBe(true);
+    expect(result.heading, name).toBeGreaterThanOrEqual(30);
+    measurements.push({page:name,...result});
+  }
+  await testInfo.attach('readability-page-audit', {body:JSON.stringify(measurements,null,2),contentType:'application/json'});
+});
+
+test('administration configuration and diagnostics are real and progressive', async ({page,request}) => {
+  await completeSetup(request);
+  await page.goto('/#settings');
+  await expect(page.getByRole('heading',{name:'Enterprise / Administration'})).toBeVisible();
+  await expect(page.locator('#enterprise-form')).toBeHidden();
+  await page.getByText('Enterprise deployment configuration',{exact:true}).click();
+  await page.getByLabel('Organization name',{exact:true}).fill('UI validation organization');
+  await page.getByRole('button',{name:'Save deployment configuration'}).click();
+  await expect(page.locator('#administration-status')).toContainText('configuration saved');
+  await page.reload();
+  await page.getByText('Enterprise deployment configuration',{exact:true}).click();
+  await expect(page.getByLabel('Organization name',{exact:true})).toHaveValue('UI validation organization');
+  await page.getByText('Diagnostics for IT support',{exact:true}).click();
+  await expect(page.locator('#diagnostics-content')).toContainText('0.16.0');
+  await expect(page.getByRole('button',{name:'Backup Application Data',exact:true})).toBeVisible();
+});
+
+test('destructive modal traps keyboard focus', async ({page,request}) => {
+  await completeSetup(request);
+  await page.goto('/#settings');
+  await page.getByRole('button',{name:'Clear Telemetry Data',exact:true}).click();
+  await expect(page.locator('#cancel-telemetry-clear')).toBeFocused();
+  await page.keyboard.press('Shift+Tab');
+  await expect(page.locator('#confirm-telemetry-clear')).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(page.locator('#cancel-telemetry-clear')).toBeFocused();
+  await page.locator('#cancel-telemetry-clear').click();
+  await expect(page.getByRole('button',{name:'Clear Telemetry Data',exact:true})).toBeFocused();
+});
+
+test('secondary text and table headers have readable contrast in both themes', async ({page,request}) => {
+  await completeSetup(request);
+  await page.goto('/#usage');
+  await expect(page.locator('.analytics-row.head')).toBeVisible();
+  for (const light of [false,true]) {
+    const ratios=await page.evaluate(light => {
+      document.body.classList.toggle('light-theme',light);
+      const luminance=color => {
+        const rgb=color.match(/[\d.]+/g).slice(0,3).map(Number).map(v=>{v/=255;return v<=0.04045?v/12.92:((v+0.055)/1.055)**2.4;});
+        return rgb[0]*0.2126+rgb[1]*0.7152+rgb[2]*0.0722;
+      };
+      return ['.analytics-row.head','header p','footer'].map(selector=>{
+        const node=document.querySelector('main '+selector),fg=luminance(getComputedStyle(node).color);
+        const swatch=document.createElement('span');swatch.style.backgroundColor=getComputedStyle(document.querySelector('main')).getPropertyValue('--panel');document.body.append(swatch);
+        const bg=luminance(getComputedStyle(swatch).backgroundColor);swatch.remove();
+        return (Math.max(fg,bg)+0.05)/(Math.min(fg,bg)+0.05);
+      });
+    },light);
+    expect(ratios.every(ratio=>ratio>=4.5)).toBe(true);
+  }
+});
+
 async function completeSetup(request) {
   await request.put('http://127.0.0.1:8000/api/v1/application/setup', {
     data: { choice: 'demo', privacy: {} },

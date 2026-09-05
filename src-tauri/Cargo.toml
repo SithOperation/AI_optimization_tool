@@ -1,6 +1,6 @@
 [package]
 name = "ai-optimization-tool"
-version = "0.15.0"
+version = "0.16.0"
 description = "Local-first AI usage optimization desktop application"
 authors = ["AI Optimization Tool contributors"]
 license = "Apache-2.0"

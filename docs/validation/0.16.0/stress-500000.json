@@ -1,0 +1,27 @@
+{
+  "rows": 500000,
+  "python_import_seconds": 1.3313770000022487,
+  "measurement": "TestClient full upload/analyze/commit; process peak working set; one query per route (not browser paint)",
+  "fixture_bytes": 131250082,
+  "lifespan_startup_seconds": 0.08962590000010096,
+  "empty_query_ms": {
+    "dashboard": 8.034,
+    "usage": 3.96,
+    "costs": 3.365,
+    "models": 13.869,
+    "telemetry_page": 2.461
+  },
+  "upload_seconds": 0.6808222000036039,
+  "analyze_seconds": 1.0602030000009108,
+  "commit_seconds": 95.08381540000119,
+  "database_growth_bytes": 243609600,
+  "populated_query_ms": {
+    "dashboard": 2003.595,
+    "usage": 1229.26,
+    "costs": 302.303,
+    "models": 837.54,
+    "telemetry_page": 3.244
+  },
+  "peak_process_memory_bytes": 324435968,
+  "reset_seconds": 0.16082270000333665
+}
